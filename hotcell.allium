@@ -1,0 +1,283 @@
+-- allium: 3
+-- hotcell.allium
+
+-- Scope: Hotcell — an AI coding agent sandbox
+-- Includes: Cell (isolated environment), Cellfile (declaration source),
+--           Session (program invocation), provisioning, network firewall,
+--           filesystem isolation
+-- Excludes:
+--   - Authentication and authorization of callers
+--   - Billing, quota, resource limits
+--   - Choice of agent program (hotcell runs any executable)
+--   - Cellfile format and parsing (implementation detail)
+-- Dependencies: none
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity Developer {
+    -- The human operator who authors Cellfiles and invokes programs inside cells.
+}
+
+external entity AgentProgram {
+    -- The executable hotcell runs inside a cell. Hotcell does not manage or
+    -- constrain which program this is; it simply executes it in the sandbox.
+}
+
+external entity Cellfile {
+    -- A declaration file at {directory}/Cellfile. Content is developer-authored
+    -- and read fresh on every access, so the declaration always reflects the
+    -- current file. Contains a single CellDeclaration; it does not define names.
+    directory: String
+    declaration: CellDeclaration
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value Endpoint {
+    host: String
+    port: Integer?
+}
+
+value NetworkPolicy {
+    -- Offline by default: an empty allowed_endpoints set means no network access.
+    allowed_endpoints: Set<Endpoint>
+}
+
+value FileMapping {
+    source: String       -- host path to seed from
+    target: String       -- path inside the sandbox filesystem
+}
+
+value EnvVar {
+    key: String
+    value: String
+}
+
+value CellDeclaration {
+    packages: Set<String>
+    files: Set<FileMapping>
+    environment: Set<EnvVar>
+    network: NetworkPolicy
+    workdir: String
+}
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity Cell {
+    -- Identity is the pair (Cellfile, name). The Cellfile does not define
+    -- names; the name is a developer-chosen label, defaulting to "default",
+    -- so multiple cells can be created from a single Cellfile.
+    cellfile: Cellfile
+    name: String
+    status: unprovisioned | provisioned
+
+    sessions: Session with cell = this
+    active_sessions: sessions where status = running
+
+    -- The declaration the cell was last provisioned with — i.e. the
+    -- environment the agent actually sees. Set on provision, reconciled on run.
+    provisioned_as: CellDeclaration when status = provisioned
+
+    -- True (fresh) when the provisioned environment matches the Cellfile's
+    -- current declaration. False (stale) when the Cellfile has changed since
+    -- the last provisioning.
+    is_current: provisioned_as = cellfile.declaration
+
+    transitions status {
+        unprovisioned -> provisioned
+        provisioned -> unprovisioned
+    }
+}
+
+entity Session {
+    cell: Cell
+    program: String
+    args: List<String>
+    status: running | completed
+    started_at: Timestamp
+    ended_at: Timestamp when status = completed
+    exit_code: Integer when status = completed
+
+    transitions status {
+        running -> completed
+        terminal: completed
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    workdir: String = "/work"
+    default_cell_name: String = "default"
+    state_dir: String = ".cell"
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- First run for a name: create the cell, provision it from the Cellfile's
+-- current declaration, and start a session.
+
+rule CreateAndProvisionOnFirstRun {
+    when: RunCell(cellfile, name, program, args)
+    requires: not exists Cell{cellfile, name}
+    let declaration = cellfile.declaration
+    ensures:
+        let cell = Cell.created(cellfile: cellfile, name: name, status: provisioned, provisioned_as: declaration)
+        Session.created(cell: cell, program: program, args: args, status: running, started_at: now)
+}
+
+-- Existing cell, not yet provisioned: provision from the Cellfile's current
+-- declaration and start a session.
+
+rule ProvisionExistingCell {
+    when: RunCell(cellfile, name, program, args)
+    requires: exists Cell{cellfile, name}
+    let cell = Cell{cellfile, name}
+    requires: cell.status = unprovisioned
+    let declaration = cellfile.declaration
+    ensures:
+        cell.status = provisioned
+        cell.provisioned_as = declaration
+        Session.created(cell: cell, program: program, args: args, status: running, started_at: now)
+}
+
+-- Existing provisioned cell: reconcile the provisioned environment to the
+-- Cellfile's current declaration, then start a session.
+
+rule RunProvisionedCell {
+    when: RunCell(cellfile, name, program, args)
+    requires: exists Cell{cellfile, name}
+    let cell = Cell{cellfile, name}
+    requires: cell.status = provisioned
+    let declaration = cellfile.declaration
+    ensures:
+        cell.provisioned_as = declaration
+        Session.created(cell: cell, program: program, args: args, status: running, started_at: now)
+}
+
+-- Session completes when the program exits.
+
+rule SessionCompletes {
+    when: ProgramExits(session, exit_code)
+    requires: session.status = running
+    ensures:
+        session.status = completed
+        session.ended_at = now
+        session.exit_code = exit_code
+}
+
+-- Destroying: tear down the provisioned filesystem, return to unprovisioned.
+
+rule DestroyCell {
+    when: DestroyCellCommand(cell)
+    requires: cell.status = provisioned
+    requires: cell.active_sessions.count = 0
+    ensures:
+        cell.status = unprovisioned
+        cell.provisioned_as = null
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- The agent's view from inside the cell: an isolated filesystem, network
+-- access per the provisioned policy, and the declared environment.
+
+surface Cleanroom {
+    facing agent: AgentProgram
+
+    context cell: Cell where status = provisioned
+
+    exposes:
+        cell.provisioned_as.workdir
+        cell.provisioned_as.environment
+        cell.provisioned_as.network.allowed_endpoints
+
+    @guarantee FilesystemIsolation
+        -- The agent cannot access any host filesystem path outside the
+        -- sandbox. All file operations are confined to the cell's filesystem.
+
+    @guarantee NetworkFirewall
+        -- The agent can only reach endpoints in the cell's provisioned
+        -- network policy. All other network connections are blocked.
+        -- Enforcement is via an HTTP proxy; non-HTTP traffic is blocked by
+        -- default. A cell with no allowed endpoints has no network access.
+
+    @guarantee CleanEnvironment
+        -- Only declared packages and seeded files are present when a
+        -- session starts. No host state leaks into the sandbox.
+}
+
+-- The developer's view, scoped to the Cellfile in their current working
+-- directory. Status discovery is per-directory, not global.
+
+surface DeveloperCLI {
+    facing developer: Developer
+
+    context cwd: Cellfile
+
+    exposes:
+        for cell in Cells where cellfile = cwd:
+            cell.name
+            cell.status
+            cell.is_current
+
+    provides:
+        RunCell(cwd, name, program, args)
+            -- name defaults to config.default_cell_name when omitted
+        DestroyCellCommand(cell)
+            when cell.cellfile = cwd
+
+    @guarantee StateColocatedWithCellfile
+        -- Cell state persists in the state directory ({directory}/{state_dir})
+        -- alongside the Cellfile, so it follows the Cellfile across directory
+        -- renames. A cell's identity is (Cellfile, name), not its directory
+        -- path; renaming the directory does not orphan the cell.
+
+    @guidance
+        -- Convention over configuration: hotcell looks for $PWD/Cellfile.
+        -- The default cell name is "default"; additional names let a developer
+        -- create more than one cell from a single Cellfile.
+}
+
+-- The sandbox runtime reports program exit. This is not a developer action;
+-- it is an observable outcome from inside the cell.
+
+surface SandboxRuntime {
+    facing runtime: AgentProgram
+
+    context session: Session where status = running
+
+    provides:
+        ProgramExits(session, exit_code)
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred SessionTermination.terminate    -- see: detailed/session-termination.allium
+-- Roadmap: allow a developer to forcibly stop a running session so that a
+-- cell can be destroyed without waiting for the program to exit on its own.
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "When a session is terminated, does it reach the same 'completed' state as a natural exit, or a distinct 'terminated' state with its own exit semantics?"
+open question "Can a developer exec into a running session (attach), or is the session's stdout/stderr strictly relay-only?"
+open question "Should network policy support port-level restrictions, or are hostname/domain-level allowlist entries sufficient?"
+open question "Does provisioning have observable failure states (e.g. a package fails to install), and if so what does the developer see?"
+open question "Should files produced by the agent be retrievable from the sandbox after the session ends but before destroying?"
+open question "When a Cellfile is removed or its declaration becomes unresolvable, are existing provisioned cells marked stale or left as-is until next run?"
