@@ -106,15 +106,27 @@ impl Cellfile {
 
     /// Read the Cellfile from `directory`, fresh from disk. An empty Cellfile
     /// yields a default declaration (no-op provisioner, offline, empty env).
+    /// The Cellfile is expected at `{directory}/Cellfile`.
     pub fn read(directory: &Path) -> anyhow::Result<Self> {
-        let path = directory.join("Cellfile");
+        Self::read_at(&directory.join("Cellfile"))
+    }
+
+    /// Read the Cellfile at an explicit `path`, fresh from disk. The cell's
+    /// directory (used for state and bind-mounts) is the file's parent, so
+    /// state continues to live alongside the Cellfile. An empty Cellfile
+    /// yields a default declaration.
+    pub fn read_at(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
             anyhow::bail!("no Cellfile found at {}", path.display());
         }
-        let text = std::fs::read_to_string(&path)?;
-        let declaration = parse(&text, &path)?;
+        let text = std::fs::read_to_string(path)?;
+        let declaration = parse(&text, path)?;
+        let directory = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         Ok(Self {
-            directory: directory.to_path_buf(),
+            directory,
             declaration,
         })
     }
