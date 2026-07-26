@@ -340,8 +340,14 @@ surface DeveloperCLI {
             cell.is_current
 
     provides:
-        RunCell(cwd, name, program, args)
-            -- name defaults to config.default_cell_name when omitted
+        RunCell(cwd, name, program, args, provisioner_override?)
+            -- name defaults to config.default_cell_name when omitted.
+            -- provisioner_override, when given, replaces the Cellfile's
+            -- declared provisioner (kind and, for "script", the script path)
+            -- for this run only; the Cellfile's declared provisioner.host_paths
+            -- are preserved. The override is a one-shot deviation, so the
+            -- recorded provisioned_as reflects it and a subsequent run without
+            -- the override re-provisions.
         DestroyCellCommand(cell)
             when cell.cellfile = cwd
 

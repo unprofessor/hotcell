@@ -29,6 +29,15 @@ enum Command {
         /// Cell name. Defaults to "default".
         #[arg(long, default_value = state::DEFAULT_CELL_NAME)]
         name: String,
+        /// Override the declared provisioner for this run, as `kind[:file]`.
+        ///
+        /// `kind` is a provisioner kind (e.g. `none`, `script`). For `script`,
+        /// append `:path` to name the script (relative to the Cellfile
+        /// directory), e.g. `--provision script:provision.sh`. For `none`, the
+        /// `:file` part is omitted. Overrides `provisioner` / `provision.script`
+        /// in the Cellfile for this invocation only.
+        #[arg(long, value_name = "KIND[:FILE]")]
+        provision: Option<String>,
         /// Program to execute inside the cell.
         program: String,
         /// Arguments to pass to the program.
@@ -47,7 +56,9 @@ enum Command {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run { name, program, args } => run_cell(&name, &program, &args),
+        Command::Run { name, provision, program, args } => {
+            run_cell(&name, provision.as_deref(), &program, &args)
+        }
         Command::Destroy { name } => destroy_cell(&name),
         Command::Status => status(),
     }
@@ -58,6 +69,96 @@ fn current_cellfile() -> Result<Cellfile> {
     Cellfile::read(&cwd)
 }
 
+/// Parse a `--provision` override value of the form `kind[:file]` and apply
+/// it to an existing provisioner, preserving `host_paths` (which are a
+/// Cellfile-declared bootstrap allowance, not something the CLI override
+/// touches).
+///
+/// `none` or `none:` → no-op provisioner. `script:./provision.sh` → script
+/// provisioner with the given script path (kept as-is; resolved relative to
+/// the Cellfile directory by the provisioner). `script` alone is accepted but
+/// will fail later if the script kind requires a path and none is set.
+fn apply_provision_override(
+    spec: &str,
+    base: &crate::cellfile::Provisioner,
+) -> Result<crate::cellfile::Provisioner> {
+    use crate::cellfile::Provisioner;
+
+    let (kind, file) = match spec.split_once(':') {
+        Some((k, f)) => (k.to_string(), if f.is_empty() { None } else { Some(f.to_string()) }),
+        None => (spec.to_string(), None),
+    };
+
+    if kind.is_empty() {
+        bail!("--provision value must start with a kind, got `{spec}`");
+    }
+
+    Ok(Provisioner {
+        kind,
+        script: file,
+        // host_paths are a Cellfile-declared bootstrap allowance; the CLI
+        // override only selects which provisioner runs, not what it may read.
+        host_paths: base.host_paths.clone(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_provision_override;
+    use crate::cellfile::Provisioner;
+
+    fn base_with_paths() -> Provisioner {
+        Provisioner {
+            kind: "none".into(),
+            script: None,
+            host_paths: vec!["~/.nvm".into()],
+        }
+    }
+
+    #[test]
+    fn override_none() {
+        let p = apply_provision_override("none", &base_with_paths()).unwrap();
+        assert_eq!(p.kind, "none");
+        assert_eq!(p.script, None);
+        assert_eq!(p.host_paths, vec!["~/.nvm"]); // preserved
+    }
+
+    #[test]
+    fn override_none_with_colon() {
+        let p = apply_provision_override("none:", &base_with_paths()).unwrap();
+        assert_eq!(p.kind, "none");
+        assert_eq!(p.script, None);
+    }
+
+    #[test]
+    fn override_script_with_file() {
+        let p = apply_provision_override("script:./provision.sh", &base_with_paths()).unwrap();
+        assert_eq!(p.kind, "script");
+        assert_eq!(p.script.as_deref(), Some("./provision.sh"));
+        assert_eq!(p.host_paths, vec!["~/.nvm"]); // preserved
+    }
+
+    #[test]
+    fn override_script_without_file() {
+        // Accepted; select_provisioner will error later if script requires a path.
+        let p = apply_provision_override("script", &base_with_paths()).unwrap();
+        assert_eq!(p.kind, "script");
+        assert_eq!(p.script, None);
+    }
+
+    #[test]
+    fn override_rejects_empty_kind() {
+        assert!(apply_provision_override(":file", &base_with_paths()).is_err());
+    }
+
+    #[test]
+    fn override_unknown_kind_is_accepted_here() {
+        // Kind validation happens in select_provisioner, not the parser.
+        let p = apply_provision_override("frobnicate:f.sh", &base_with_paths()).unwrap();
+        assert_eq!(p.kind, "frobnicate");
+    }
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -65,8 +166,18 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
+fn run_cell(name: &str, provision_override: Option<&str>, program: &str, args: &[String]) -> Result<()> {
     let cellfile = current_cellfile()?;
+
+    // Apply a CLI provisioner override (if any) before provisioning. The
+    // override is a one-shot deviation from the Cellfile's declared
+    // provisioner for this invocation; the recorded `provisioned_as` reflects
+    // the override, so a subsequent run without it will re-provision.
+    let mut declaration = cellfile.declaration.clone();
+    if let Some(spec) = provision_override {
+        declaration.provisioner = apply_provision_override(spec, &cellfile.declaration.provisioner)?;
+    }
+
     let mut cell = state::load_cell(&cellfile, name)?;
 
     // Carry the program/args through the provisioning phase in memory.
@@ -77,10 +188,10 @@ fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
     // the cell unprovisioned rather than stuck.
     state::begin_provisioning(&cellfile.directory, name)?;
 
-    // Provisioning phase: the declared provisioner seeds the cell's rootfs.
-    // Mirrors ProvisionSucceeds / ProvisionFails and the
+    // Provisioning phase: the (possibly overridden) provisioner seeds the
+    // cell's rootfs. Mirrors ProvisionSucceeds / ProvisionFails and the
     // ProvisioningLogsToConsole guarantee.
-    let outcome = provision(&cell, &cellfile.declaration)?;
+    let outcome = provision(&cell, &declaration)?;
     let declaration = match outcome {
         ProvisionOutcome::Succeeded(d) => d,
         ProvisionOutcome::Failed(err) => {
