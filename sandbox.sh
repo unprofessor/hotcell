@@ -10,8 +10,10 @@ bwrap \
     --ro-bind ~/.nvm/versions/node ~/.nvm/versions/node \
     --ro-bind ~/.bun/bin ~/.bun/bin \
     --ro-bind ~/.local/bin ~/.local/bin \
+    --ro-bind ~/.rustup ~/.rustup \
     --ro-bind ~/.cargo/bin ~/.cargo/bin \
     --bind ~/.pi ~/.pi \
+    --bind ~/.agents/skills ~/.agents/skills \
     --bind ~/.gitconfig ~/.gitconfig \
     --bind ~/.config/git ~/.config/git \
     --bind "$(pwd)" "$(pwd)" \
@@ -21,4 +23,4 @@ bwrap \
     --unshare-pid \
     --share-net \
     --die-with-parent \
-    -- $1
+    -- $@
