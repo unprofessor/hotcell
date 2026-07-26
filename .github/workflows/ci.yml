@@ -37,6 +37,20 @@ jobs:
           sudo apt-get install -y bubblewrap
           bwrap --version
 
+      # Ubuntu 24.04 (ubuntu-latest) ships with AppArmor's
+      # apparmor_restrict_unprivileged_userns=1, which blocks unprivileged
+      # user namespaces. bwrap then can't get CAP_NET_ADMIN in the network
+      # namespace it creates for --unshare-net, so loopback setup fails with
+      # "loopback: Failed RTM_NEWADDR: Operation not permitted". Relaxing this
+      # single sysctl lets bwrap set up the net ns (and bring up lo) the same
+      # way it does on a normal workstation; the --unshare-net sandbox the
+      # tests exercise is unchanged.
+      - name: Allow unprivileged user namespaces (for bwrap --unshare-net)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Smoke-test: bring up a net ns and run a trivial program.
+          bwrap --unshare-net --dev-bind / / -- /bin/true
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
