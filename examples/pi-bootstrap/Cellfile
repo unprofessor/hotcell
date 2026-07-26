@@ -1,0 +1,52 @@
+# Example: bootstrap a Pi Agent (https://pi.dev) inside a hotcell.
+#
+# This Cellfile declares the script provisioner and the environment Pi needs
+# inside the sandbox. The provision script (provision.sh) installs Pi's *own*
+# copy of node and the pi binary into the cell rootfs — nothing is shared from
+# the host except the read-only base system.
+#
+# The provisioner runs INSIDE the cell sandbox (rootfs as "/"), with read-only
+# access to the host paths listed via `provision.host_path` so it can copy
+# tools in. The agent later runs with NO host-path access — only the
+# provisioned rootfs. This is the permissions model: provisioner may
+# bootstrap, agent may not.
+#
+# Usage, from this directory:
+#   hotcell run -- pi
+#
+# Provide an API key for your provider via the env, e.g. copy this file to
+# `Cellfile` and edit, or set the key in the env.* lines below.
+
+provisioner = script
+provision.script = ./provision.sh
+workdir = /work
+
+# Host paths the provisioner may read (read-only) to bootstrap from. The agent
+# never sees these. We grant access to the nvm node tree so the provisioner
+# can copy node + npm into the cell, plus the developer's Pi config/skills to
+# seed the agent home.
+provision.host_path = ~/.nvm/versions/node
+provision.host_path = ~/.pi
+provision.host_path = ~/.agents/skills
+provision.host_path = ~/.gitconfig
+
+# Pi's runtime environment inside the sandbox.
+# PATH points at the provisioned pi + node first, then the base system.
+env.PATH = /opt/pi/bin:/opt/node/bin:/usr/bin:/bin
+env.HOME = /home/agent
+
+# Pick a provider and supply its API key. Pi defaults to google (Gemini).
+env.PI_PROVIDER = google
+# env.GOOGLE_API_KEY = ...
+# env.PI_PROVIDER = anthropic
+# env.ANTHROPIC_API_KEY = ...
+# env.PI_PROVIDER = openai
+# env.OPENAI_API_KEY = ...
+
+# Allow egress to the model provider(s) you use.
+# NOTE: network firewall enforcement is not yet implemented; hotcell will
+# refuse to run a cell with a non-empty network policy until it is. Comment
+# these out to run offline, or watch for firewall support.
+# network.allow = generativelanguage.googleapis.com:443
+# network.allow = api.anthropic.com:443
+# network.allow = api.openai.com:443

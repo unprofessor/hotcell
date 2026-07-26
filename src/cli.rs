@@ -77,8 +77,10 @@ fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
     // the cell unprovisioned rather than stuck.
     state::begin_provisioning(&cellfile.directory, name)?;
 
-    // Provisioning phase.
-    let outcome = provision(&cell, &cellfile.declaration);
+    // Provisioning phase: the declared provisioner seeds the cell's rootfs.
+    // Mirrors ProvisionSucceeds / ProvisionFails and the
+    // ProvisioningLogsToConsole guarantee.
+    let outcome = provision(&cell, &cellfile.declaration)?;
     let declaration = match outcome {
         ProvisionOutcome::Succeeded(d) => d,
         ProvisionOutcome::Failed(err) => {
@@ -91,33 +93,45 @@ fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
     cell.provisioned_as = Some(declaration);
 
     // Launch the agent inside the isolated sandbox, relaying stdio.
-    // Mirrors RelayOnly / CleanEnvironment guarantees.
-    let env: Vec<(String, String)> = cell
-        .provisioned_as
-        .as_ref()
-        .map(|d| {
-            d.environment
-                .iter()
-                .map(|v| (v.key.clone(), v.value.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Mirrors RelayOnly / CleanEnvironment / ProvisionedEnvironment.
+    let provisioned = cell.provisioned_as.as_ref().expect("just provisioned");
+    let env: Vec<(String, String)> = provisioned
+        .environment
+        .iter()
+        .map(|v| (v.key.clone(), v.value.clone()))
+        .collect();
 
-    // Workdir from the provisioned declaration, falling back to the Cellfile's
-    // directory when unset (empty). The spec's config default is "/work", but
-    // that is the in-sandbox path; the host-side source is the cellfile dir.
-    let workdir = cell
-        .provisioned_as
-        .as_ref()
-        .map(|d| d.workdir.clone())
-        .filter(|w| !w.is_empty())
-        .unwrap_or_else(|| cellfile.directory.to_string_lossy().into_owned());
+    // In-sandbox workdir from the provisioned declaration; config default is
+    // "/work". The host-side backing lives under the cell's rootfs and is
+    // created by the provisioner (or the safety-net below).
+    let workdir = if provisioned.workdir.is_empty() {
+        "/work".to_string()
+    } else {
+        provisioned.workdir.clone()
+    };
 
-    let cell_root = state::cell_state_dir(&cellfile.directory, name);
-    std::fs::create_dir_all(&cell_root)?;
+    let cell_fs = state::fs_dir(&cellfile.directory, name);
+    // Safety net: ensure the workdir exists even if a provisioner forgot to.
+    let workdir_host = crate::provisioning::workdir_host_path(&cell_fs, &workdir);
+    std::fs::create_dir_all(&workdir_host)?;
+
+    // Network firewall (HTTP allowlist proxy) is not yet implemented. Until it
+    // is, refuse to run cells that declare a non-empty network policy rather
+    // than silently granting full egress — the agent profile is offline.
+    if !provisioned.network.allowed_endpoints.is_empty() {
+        state::mark_failed(&cellfile.directory, name)?;
+        eprintln!(
+            "network policy with allowed endpoints is not yet supported (firewall unimplemented); cell declared {} endpoint(s)",
+            provisioned.network.allowed_endpoints.len()
+        );
+        std::process::exit(1);
+    }
+
     let log_file = state::log_file_path(&cellfile.directory, name);
 
-    let mut cmd = crate::isolation::build_command(&cell_root, &workdir, &env, program, args);
+    let mut cmd = crate::isolation::build_agent_command(
+        &cell_fs, &workdir, &env, program, args,
+    );
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -125,7 +139,8 @@ fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
     eprintln!("session log: {}", log_file.display());
 
     let mut child = cmd.spawn()?;
-    let exit_status = child.wait()?;
+    let exit_status = child.wait()?
+;
 
     if !exit_status.success() {
         eprintln!(

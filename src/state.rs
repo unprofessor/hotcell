@@ -25,13 +25,24 @@ use crate::cellfile::{CellDeclaration, Cellfile};
 /// Config defaults from the specification.
 pub const DEFAULT_CELL_NAME: &str = "default";
 pub const STATE_DIR: &str = ".cell";
+pub const DEFAULT_PROVISIONER_KIND: &str = "none";
 
 const PROVISIONED_AS_FILE: &str = "provisioned_as.json";
 const FAILED_MARKER: &str = "failed";
+const FS_DIR: &str = "fs";
 
 /// A cell's state directory: `{cellfile_directory}/{STATE_DIR}/{name}`.
 pub fn cell_state_dir(cellfile_directory: &Path, name: &str) -> PathBuf {
     cellfile_directory.join(STATE_DIR).join(name)
+}
+
+/// The cell's sandbox rootfs backing directory: `{state_dir}/fs`. This is
+/// bind-mounted as `/` inside the sandbox, so everything the provisioner
+/// writes here is visible to the agent. State markers (`provisioned_as.json`,
+/// `failed`, `session.log`) live in the state directory *outside* `fs`, so
+/// the agent cannot see or tamper with them.
+pub fn fs_dir(cellfile_directory: &Path, name: &str) -> PathBuf {
+    cell_state_dir(cellfile_directory, name).join(FS_DIR)
 }
 
 /// Path for a session's log file, derived from the cell's state directory.

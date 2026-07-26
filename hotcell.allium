@@ -35,8 +35,13 @@ external entity Cellfile {
 
 external entity ProvisioningProcess {
     -- hotcell's internal provisioning system: installs packages, seeds files,
-    -- configures the network firewall and environment. Reports success or
-    -- failure as outcomes; the spec does not prescribe how provisioning works.
+    -- configures the network firewall and environment. The provisioner is
+    -- pluggable: the Cellfile declares which provisioner kind to use, and the
+    -- spec does not prescribe how a given kind provisions — only that it
+    -- reports success or failure as outcomes. Known kinds: "none" (a no-op
+    -- provisioner that leaves the cell empty) and "script" (execute a shell
+    -- script that seeds the cell's filesystem). Further kinds may be added
+    -- without changing this contract.
 }
 
 ------------------------------------------------------------
@@ -63,12 +68,30 @@ value EnvVar {
     value: String
 }
 
+value Provisioner {
+    -- Declares which provisioner brings the cell's environment into being.
+    -- kind is an open set; the spec does not prescribe what a provisioner of
+    -- a given kind does, only that one is selected from the declaration and
+    -- that it reports success or failure. "none" is a no-op; "script" runs
+    -- the script at `script` (relative to the Cellfile directory).
+    --
+    -- host_paths are host filesystem paths the provisioner may read
+    -- (read-only) while provisioning — e.g. a language runtime tree to copy
+    -- into the cell. They are the provisioner's bootstrap allowance and are
+    -- never visible to the agent. See the ProvisioningRuntime surface's
+    -- BootstrapRiskProfile guarantee.
+    kind: String
+    script: String?
+    host_paths: Set<String>
+}
+
 value CellDeclaration {
     packages: Set<String>
     files: Set<FileMapping>
     environment: Set<EnvVar>
     network: NetworkPolicy
     workdir: String
+    provisioner: Provisioner
 }
 
 ------------------------------------------------------------
@@ -142,6 +165,7 @@ config {
     workdir: String = "/work"
     default_cell_name: String = "default"
     state_dir: String = ".cell"
+    default_provisioner_kind: String = "none"
 }
 
 ------------------------------------------------------------
@@ -281,6 +305,15 @@ surface Cleanroom {
         -- The agent cannot access any host filesystem path outside the
         -- sandbox. All file operations are confined to the cell's filesystem.
 
+    @guarantee ProvisionedEnvironment
+        -- The agent's tools, files, and working directory are provisioned into
+        -- the cell's filesystem by the declared provisioner before the session
+        -- starts. The sandbox does not bind-mount host-specific tool directories
+        -- (language runtimes, agent binaries, skills, agent config); only
+        -- read-only base system directories and the cell's own filesystem are
+        -- visible. A provisioned cell is reproducible from its Cellfile — no
+        -- host state leaks in beyond the shared read-only base system.
+
     @guarantee NetworkFirewall
         -- The agent can only reach endpoints in the cell's provisioned
         -- network policy. All other network connections are blocked.
@@ -363,6 +396,34 @@ surface ProvisioningRuntime {
     provides:
         ProvisioningSucceeded(cell, declaration)
         ProvisioningFailed(cell, error)
+
+    @guarantee ProvisionerRunsInCell
+        -- The provisioner executes inside the cell's isolated filesystem,
+        -- writing into the same rootfs the agent will later see. It does not
+        -- run directly on the host; it is sandboxed just as the agent is, but
+        -- under a different permissions profile.
+
+    @guarantee BootstrapRiskProfile
+        -- The provisioner runs a trusted, developer-authored process and so
+        -- carries a broader risk profile than the agent: read-only access to
+        -- the host paths declared in `provisioner.host_paths` (to install
+        -- tools from) and network egress (to fetch packages). The agent, by
+        -- contrast, runs under the Cleanroom profile with no host-path access
+        -- and firewall-enforced network. This asymmetry is the core of the
+        -- permissions model: the provisioner may bootstrap, the agent may not.
+
+    @guarantee ProvisionerCannotWriteHost
+        -- Despite its broader read access, the provisioner cannot modify any
+        -- host path. All host binds are read-only; writes are confined to the
+        -- cell's rootfs.
+
+    @guarantee ProvisionerCleanEnvironment
+        -- The provisioner's environment is the host environment plus hotcell
+        -- control variables (HOTCELL_*). It deliberately does NOT receive the
+        -- declared `env.*` variables — those are the agent's environment, and
+        -- a different actor. This keeps the provisioner's bootstrap PATH and
+        -- tooling intact while the agent gets a clean, declared-only
+        -- environment.
 }
 
 -- The sandbox runtime reports program exit. This is not a developer action;
@@ -391,3 +452,4 @@ deferred SessionTermination.terminate    -- see: detailed/session-termination.al
 
 open question "When a session is terminated, does it reach the same 'completed' state as a natural exit, or a distinct 'terminated' state with its own exit semantics?"
 open question "Network policy granularity: hostname/domain allowlist is sufficient for v1, but further research is needed on whether port-level restrictions, protocol restrictions, or path-level restrictions are required for real-world agent workflows"
+open question "Can a provisioner mutate the declaration during provisioning (e.g. inject environment variables it discovered), or is the declaration strictly authoritative and the provisioner only seeds the filesystem? v1 assumes the latter."
