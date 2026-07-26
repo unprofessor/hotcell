@@ -5,15 +5,14 @@
 //! `hotcell run` blocks until the program exits, relaying stdio faithfully
 //! and passing the exit code through.
 
-use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use crate::cell::{Cell, CellStatus};
+use crate::cell::CellStatus;
 use crate::cellfile::Cellfile;
-use crate::provisioning;
+use crate::provisioning::{provision, ProvisionOutcome};
 use crate::state;
 
 #[derive(Parser)]
@@ -68,52 +67,31 @@ fn now_unix() -> u64 {
 
 fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
     let cellfile = current_cellfile()?;
+    let mut cell = state::load_cell(&cellfile, name)?;
 
-    // Resolve or create the cell, then drive it into the provisioning phase.
-    // Mirrors CreateCellForProvisioning / Reprovision* rules.
-    let mut cell = match state::load_cell(&cellfile, name)? {
-        Some(c) => c,
-        None => Cell::new(&cellfile, name),
-    };
-
-    let can_reprovision = matches!(
-        cell.status,
-        CellStatus::Unprovisioned | CellStatus::ProvisioningFailed | CellStatus::Provisioned
-    );
-    if !can_reprovision {
-        bail!(
-            "cell {:?} is already provisioning; wait for it to finish",
-            name
-        );
-    }
-
-    cell.status = CellStatus::Provisioning;
-    cell.provisioned_as = None;
-    cell.provisioning_error = None;
+    // Carry the program/args through the provisioning phase in memory.
     cell.pending_program = Some(program.to_string());
     cell.pending_args = args.to_vec();
-    state::save_cell(&cell)?;
+
+    // Enter the provisioning phase: clear durable markers so a crash leaves
+    // the cell unprovisioned rather than stuck.
+    state::begin_provisioning(&cellfile.directory, name)?;
 
     // Provisioning phase.
-    let outcome = provisioning::provision(&cell, &cellfile.declaration);
-    let now = now_unix();
-    let mut session = match provisioning::apply_outcome(&mut cell, outcome, now) {
-        Some(s) => s,
-        None => {
-            state::save_cell(&cell)?;
-            let err = cell.provisioning_error.clone().unwrap_or_default();
+    let outcome = provision(&cell, &cellfile.declaration);
+    let declaration = match outcome {
+        ProvisionOutcome::Succeeded(d) => d,
+        ProvisionOutcome::Failed(err) => {
+            state::mark_failed(&cellfile.directory, name)?;
             eprintln!("provisioning failed: {err}");
             std::process::exit(1);
         }
     };
-    state::save_cell(&cell)?;
+    state::mark_provisioned(&cellfile.directory, name, &declaration)?;
+    cell.provisioned_as = Some(declaration);
 
     // Launch the agent inside the isolated sandbox, relaying stdio.
     // Mirrors RelayOnly / CleanEnvironment guarantees.
-    let cell_root = state::cell_state_dir(&cellfile.directory, name);
-    std::fs::create_dir_all(&cell_root)?;
-    session.log_file = Some(state::log_file_path(&cell).to_string_lossy().into_owned());
-
     let env: Vec<(String, String)> = cell
         .provisioned_as
         .as_ref()
@@ -135,19 +113,19 @@ fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| cellfile.directory.to_string_lossy().into_owned());
 
+    let cell_root = state::cell_state_dir(&cellfile.directory, name);
+    std::fs::create_dir_all(&cell_root)?;
+    let log_file = state::log_file_path(&cellfile.directory, name);
+
     let mut cmd = crate::isolation::build_command(&cell_root, &workdir, &env, program, args);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
+    eprintln!("session log: {}", log_file.display());
+
     let mut child = cmd.spawn()?;
     let exit_status = child.wait()?;
-
-    // Session completes when the program exits (SessionCompletes rule).
-    session.status = crate::session::SessionStatus::Completed;
-    session.ended_at = Some(now_unix());
-    session.exit_code = Some(exit_status.code().unwrap_or(-1));
-    session.log_file = None;
 
     if !exit_status.success() {
         eprintln!(
@@ -162,52 +140,35 @@ fn run_cell(name: &str, program: &str, args: &[String]) -> Result<()> {
 
 fn destroy_cell(name: &str) -> Result<()> {
     let cellfile = current_cellfile()?;
-    let mut cell = match state::load_cell(&cellfile, name)? {
-        Some(c) => c,
-        None => bail!("no cell named {:?} in {}", name, cellfile.directory.display()),
-    };
-    // Mirrors DestroyCell: only provisioned or failed cells with no active
-    // sessions can be destroyed.
-    if !matches!(cell.status, CellStatus::Provisioned | CellStatus::ProvisioningFailed) {
-        bail!("cell {:?} is not in a destroyable state ({})", name, cell.status.as_str());
+    let cell = state::load_cell(&cellfile, name)?;
+    // Mirrors DestroyCell: only provisioned or failed cells can be destroyed.
+    if !matches!(cell.status(), CellStatus::Provisioned | CellStatus::ProvisioningFailed) {
+        bail!(
+            "cell {:?} is not in a destroyable state ({})",
+            name,
+            cell.status().as_str()
+        );
     }
-    state::destroy_cell(&mut cell)?;
+    state::destroy_cell(&cellfile.directory, name)?;
     println!("destroyed cell {:?}", name);
     Ok(())
 }
 
 fn status() -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let state_root = cwd.join(state::STATE_DIR);
-    if !state_root.exists() {
+    let cellfile = Cellfile::read(&cwd)?;
+    let names = state::list_cell_names(&cwd)?;
+    if names.is_empty() {
         println!("no cells in {}", cwd.display());
         return Ok(());
     }
-    for entry in std::fs::read_dir(&state_root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let _name = entry.file_name().to_string_lossy().into_owned();
-        let dir: PathBuf = entry.path();
-        let record_path = dir.join("cell.json");
-        if !record_path.exists() {
-            continue;
-        }
-        let data = std::fs::read(&record_path)?;
-        let record: state::CellRecord = serde_json::from_slice(&data)?;
-        let cell = record.cell;
-        let cellfile = Cellfile {
-            directory: cwd.clone(),
-            declaration: Cellfile::read(&cwd)
-                .map(|c| c.declaration)
-                .unwrap_or_default(),
-        };
+    for name in names {
+        let cell = state::load_cell(&cellfile, &name)?;
         let current = cell.is_current(&cellfile.declaration);
         println!(
             "{:<16} {:<20} {}",
             cell.name,
-            cell.status.as_str(),
+            cell.status().as_str(),
             if current { "current" } else { "stale" }
         );
     }

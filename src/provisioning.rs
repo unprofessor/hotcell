@@ -2,9 +2,12 @@
 //!
 //! Mirrors the `ProvisionSucceeds` / `ProvisionFails` rules: the provisioning
 //! process installs packages, seeds files, configures the network firewall
-//! and environment, and reports success or failure.
+//! and environment, and reports success or failure. The durable state
+//! transitions (marking the cell provisioned or failed on disk) are handled by
+//! the [`state`](crate::state) module; this module only runs the work and
+//! reports the outcome.
 
-use crate::cell::{Cell, CellStatus};
+use crate::cell::Cell;
 use crate::cellfile::CellDeclaration;
 
 /// Outcome of a provisioning attempt.
@@ -20,34 +23,4 @@ pub enum ProvisionOutcome {
 /// succeeds immediately with the declaration unchanged.
 pub fn provision(_cell: &Cell, declaration: &CellDeclaration) -> ProvisionOutcome {
     ProvisionOutcome::Succeeded(declaration.clone())
-}
-
-/// Apply a provisioning outcome to a cell's state, matching the spec rules.
-pub fn apply_outcome(cell: &mut Cell, outcome: ProvisionOutcome, now: u64) -> Option<crate::session::Session> {
-    match outcome {
-        ProvisionOutcome::Succeeded(declaration) => {
-            let program = cell.pending_program.take().unwrap_or_default();
-            let args = cell.pending_args.drain(..).collect::<Vec<_>>();
-            cell.status = CellStatus::Provisioned;
-            cell.provisioned_as = Some(declaration);
-            cell.provisioning_error = None;
-            // Session is created on provisioning success.
-            Some(crate::session::Session {
-                program,
-                args,
-                status: crate::session::SessionStatus::Running,
-                started_at: now,
-                ended_at: None,
-                exit_code: None,
-                log_file: None, // set by the runtime before launch.
-            })
-        }
-        ProvisionOutcome::Failed(error) => {
-            cell.status = CellStatus::ProvisioningFailed;
-            cell.provisioning_error = Some(error);
-            cell.pending_program = None;
-            cell.pending_args.clear();
-            None
-        }
-    }
 }
