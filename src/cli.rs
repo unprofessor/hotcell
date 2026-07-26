@@ -33,6 +33,11 @@ enum Command {
         /// The cell's state directory lives alongside the given file.
         #[arg(short = 'f', long = "file", value_name = "CELLFILE")]
         file: Option<String>,
+        /// Cell directory, overriding the Cellfile's parent as the root for
+        /// cell state (`.hotcell/...`). Use `--file` to read a Cellfile from
+        /// one place while keeping state in another.
+        #[arg(short = 'c', long = "cell", value_name = "DIR")]
+        cell: Option<String>,
         /// Program to execute inside the cell.
         program: String,
         /// Arguments to pass to the program.
@@ -51,8 +56,8 @@ enum Command {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Run { name, file, program, args } => {
-            run_cell(&name, file.as_deref(), &program, &args)
+        Command::Run { name, file, cell, program, args } => {
+            run_cell(&name, file.as_deref(), cell.as_deref(), &program, &args)
         }
         Command::Destroy { name } => destroy_cell(&name),
         Command::Status => status(),
@@ -79,8 +84,22 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn run_cell(name: &str, cellfile_path: Option<&str>, program: &str, args: &[String]) -> Result<()> {
-    let cellfile = current_cellfile(cellfile_path)?;
+fn run_cell(
+    name: &str,
+    cellfile_path: Option<&str>,
+    cell_dir: Option<&str>,
+    program: &str,
+    args: &[String],
+) -> Result<()> {
+    let mut cellfile = current_cellfile(cellfile_path)?;
+
+    // Override the cell directory (the root for state) independently of
+    // where the Cellfile was read from. By default state lives alongside
+    // the Cellfile; `--cell` decouples the two so a Cellfile can be read
+    // from one place while state is kept in another.
+    if let Some(dir) = cell_dir {
+        cellfile.directory = std::path::PathBuf::from(dir);
+    }
 
     let declaration = cellfile.declaration.clone();
 
