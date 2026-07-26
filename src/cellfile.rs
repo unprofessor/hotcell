@@ -10,7 +10,7 @@
 //! recognised keys are:
 //!
 //! ```text
-//! provisioner = script              # provisioner kind (default: "none")
+//! provision.type = shell            # provisioner kind (default: "none")
 //! provision.script = ./provision.sh # script path, relative to the Cellfile
 //! provision.host_path = ~/.nvm      # repeatable: host path the provisioner
 //!                                  # may read (read-only) for bootstrapping
@@ -18,8 +18,8 @@
 //! package = node                    # repeatable: a package to install
 //! package = curl
 //! env.KEY = value                   # repeatable: an environment variable
-//! network.allow = host:443          # repeatable: an allowed endpoint
-//! network.allow = host              #   (port optional)
+//! net.allow = host:443              # repeatable: an allowed endpoint
+//! net.allow = host                  #   (port optional)
 //! seed = source => target           # repeatable: a file mapping
 //! ```
 //!
@@ -61,7 +61,7 @@ pub struct EnvVar {
 /// `Provisioner` value type: declares which provisioner brings the cell's
 /// environment into being. `kind` is an open set; `script` is the path to the
 /// provisioning script (relative to the Cellfile directory), used only by the
-/// `"script"` kind.
+/// `"shell"` kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provisioner {
     pub kind: String,
@@ -133,7 +133,7 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
         let key = key.trim();
         let value = value.trim();
 
-        if key == "provisioner" {
+        if key == "provision.type" {
             decl.provisioner.kind = value.to_string();
         } else if key == "provision.script" {
             decl.provisioner.script = Some(value.to_string());
@@ -148,7 +148,7 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
                 key: env_key.to_string(),
                 value: value.to_string(),
             });
-        } else if key == "network.allow" {
+        } else if key == "net.allow" {
             decl.network.allowed_endpoints.push(parse_endpoint(value, line_no, path)?);
         } else if key == "seed" {
             decl.files.push(parse_file_mapping(value, line_no, path)?);
@@ -229,7 +229,7 @@ mod tests {
     fn parses_all_keys() {
         let text = "\
 # a comment
-provisioner = script
+provision.type = shell
 provision.script = ./provision.sh
 provision.host_path = ~/.nvm/versions/node
 provision.host_path = ~/.cargo
@@ -241,14 +241,14 @@ package = curl
 env.PATH = /opt/node/bin:/usr/bin
 env.HOME = /home/agent
 
-network.allow = api.openai.com:443
-network.allow = api.anthropic.com
+net.allow = api.openai.com:443
+net.allow = api.anthropic.com
 
 seed = ./src => /work/src
 seed = ~/.gitconfig => /home/agent/.gitconfig
 ";
         let decl = parse(text, &dir()).unwrap();
-        assert_eq!(decl.provisioner.kind, "script");
+        assert_eq!(decl.provisioner.kind, "shell");
         assert_eq!(decl.provisioner.script.as_deref(), Some("./provision.sh"));
         assert_eq!(
             decl.provisioner.host_paths,
@@ -277,7 +277,7 @@ seed = ~/.gitconfig => /home/agent/.gitconfig
 
     #[test]
     fn bad_port_is_an_error() {
-        let err = parse("network.allow = host:notaport", &dir()).unwrap_err();
+        let err = parse("net.allow = host:notaport", &dir()).unwrap_err();
         assert!(err.to_string().contains("invalid port"));
     }
 }

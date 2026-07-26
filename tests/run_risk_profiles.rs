@@ -29,7 +29,7 @@ fn provisioner_can_read_declared_host_path() {
     fs::write(
         dir.path().join("Cellfile"),
         format!(
-            "provisioner = script\n\
+            "provision.type = shell\n\
              provision.script = ./provision.sh\n\
              provision.host_path = {host}\n\
              workdir = /work\n",
@@ -90,7 +90,7 @@ fn agent_cannot_see_provisioner_host_paths() {
     fs::write(
         dir.path().join("Cellfile"),
         format!(
-            "provisioner = script\n\
+            "provision.type = shell\n\
              provision.script = ./provision.sh\n\
              provision.host_path = {host}\n\
              workdir = /work\n",
@@ -189,7 +189,7 @@ fn host_home_does_not_leak_into_cell() {
     fs::write(
         dir.path().join("Cellfile"),
         format!(
-            "provisioner = script\n\
+            "provision.type = shell\n\
              provision.script = ./provision.sh\n\
              provision.host_path = {home}/.pi\n\
              provision.host_path = {home}/.gitconfig\n\

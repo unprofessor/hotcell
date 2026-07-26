@@ -1,6 +1,6 @@
 # Example: bootstrap a Pi Agent (https://pi.dev) inside a hotcell.
 #
-# This Cellfile declares the script provisioner and the environment Pi needs
+# This Cellfile declares the shell provisioner and the environment Pi needs
 # inside the sandbox. The provision script (provision.sh) installs Pi's *own*
 # copy of node and the pi binary into the cell rootfs — nothing is shared from
 # the host except the read-only base system.
@@ -17,7 +17,7 @@
 # Provide an API key for your provider via the env, e.g. copy this file to
 # `Cellfile` and edit, or set the key in the env.* lines below.
 
-provisioner = script
+provision.type = shell
 provision.script = ./provision.sh
 workdir = /work
 
@@ -47,6 +47,6 @@ env.PI_PROVIDER = google
 # NOTE: network firewall enforcement is not yet implemented; hotcell will
 # refuse to run a cell with a non-empty network policy until it is. Comment
 # these out to run offline, or watch for firewall support.
-# network.allow = generativelanguage.googleapis.com:443
-# network.allow = api.anthropic.com:443
-# network.allow = api.openai.com:443
+# net.allow = generativelanguage.googleapis.com:443
+# net.allow = api.anthropic.com:443
+# net.allow = api.openai.com:443

@@ -31,11 +31,11 @@ enum Command {
         name: String,
         /// Override the declared provisioner for this run, as `kind[:file]`.
         ///
-        /// `kind` is a provisioner kind (e.g. `none`, `script`). For `script`,
+        /// `kind` is a provisioner kind (e.g. `none`, `shell`). For `shell`,
         /// append `:path` to name the script (relative to the Cellfile
-        /// directory), e.g. `--provision script:provision.sh`. For `none`, the
-        /// `:file` part is omitted. Overrides `provisioner` / `provision.script`
-        /// in the Cellfile for this invocation only.
+        /// directory), e.g. `--provision shell:provision.sh`. For `none`, the
+        /// `:file` part is omitted. Overrides `provision.type` /
+        /// `provision.script` in the Cellfile for this invocation only.
         #[arg(long, value_name = "KIND[:FILE]")]
         provision: Option<String>,
         /// Program to execute inside the cell.
@@ -74,10 +74,10 @@ fn current_cellfile() -> Result<Cellfile> {
 /// Cellfile-declared bootstrap allowance, not something the CLI override
 /// touches).
 ///
-/// `none` or `none:` → no-op provisioner. `script:./provision.sh` → script
+/// `none` or `none:` → no-op provisioner. `shell:./provision.sh` → shell
 /// provisioner with the given script path (kept as-is; resolved relative to
-/// the Cellfile directory by the provisioner). `script` alone is accepted but
-/// will fail later if the script kind requires a path and none is set.
+/// the Cellfile directory by the provisioner). `shell` alone is accepted but
+/// will fail later if the shell kind requires a path and none is set.
 fn apply_provision_override(
     spec: &str,
     base: &crate::cellfile::Provisioner,
@@ -132,17 +132,17 @@ mod tests {
 
     #[test]
     fn override_script_with_file() {
-        let p = apply_provision_override("script:./provision.sh", &base_with_paths()).unwrap();
-        assert_eq!(p.kind, "script");
+        let p = apply_provision_override("shell:./provision.sh", &base_with_paths()).unwrap();
+        assert_eq!(p.kind, "shell");
         assert_eq!(p.script.as_deref(), Some("./provision.sh"));
         assert_eq!(p.host_paths, vec!["~/.nvm"]); // preserved
     }
 
     #[test]
     fn override_script_without_file() {
-        // Accepted; select_provisioner will error later if script requires a path.
-        let p = apply_provision_override("script", &base_with_paths()).unwrap();
-        assert_eq!(p.kind, "script");
+        // Accepted; select_provisioner will error later if shell requires a path.
+        let p = apply_provision_override("shell", &base_with_paths()).unwrap();
+        assert_eq!(p.kind, "shell");
         assert_eq!(p.script, None);
     }
 

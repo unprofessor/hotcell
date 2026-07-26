@@ -1,4 +1,4 @@
-//! Integration test: the script provisioner provisions a tool into the cell's
+//! Integration test: the shell provisioner provisions a tool into the cell's
 //! rootfs, then the agent runs it inside the sandbox.
 //!
 //! Covers the `ProvisionedEnvironment` guarantee: the agent's tools come from
@@ -20,10 +20,10 @@ fn hotcell_bin() -> String {
 fn script_provisioner_installs_tool_visible_in_sandbox() {
     let dir = TempDir::new().expect("create temp dir");
 
-    // A Cellfile that selects the script provisioner.
+    // A Cellfile that selects the shell provisioner.
     fs::write(
         dir.path().join("Cellfile"),
-        "provisioner = script\nprovision.script = ./provision.sh\nworkdir = /work\n",
+        "provision.type = shell\nprovision.script = ./provision.sh\nworkdir = /work\n",
     )
     .expect("write Cellfile");
 
@@ -76,7 +76,7 @@ fn script_provisioner_failure_fails_provisioning() {
 
     fs::write(
         dir.path().join("Cellfile"),
-        "provisioner = script\nprovision.script = ./provision.sh\n",
+        "provision.type = shell\nprovision.script = ./provision.sh\n",
     )
     .expect("write Cellfile");
 
@@ -121,10 +121,10 @@ fn script_provisioner_failure_fails_provisioning() {
 fn script_provisioner_without_script_path_is_config_error() {
     let dir = TempDir::new().expect("create temp dir");
 
-    // Selects the script provisioner but omits provision.script.
+    // Selects the shell provisioner but omits provision.script.
     fs::write(
         dir.path().join("Cellfile"),
-        "provisioner = script\n",
+        "provision.type = shell\n",
     )
     .expect("write Cellfile");
 

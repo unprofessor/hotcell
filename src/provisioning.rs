@@ -78,9 +78,9 @@ pub fn workdir_host_path(cell_root: &Path, workdir: &str) -> PathBuf {
 pub fn select_provisioner(spec: &ProvisionerSpec) -> anyhow::Result<Box<dyn Provisioner>> {
     match spec.kind.as_str() {
         state::DEFAULT_PROVISIONER_KIND => Ok(Box::new(NoneProvisioner)),
-        "script" => {
+        "shell" => {
             let script = spec.script.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("script provisioner requires `provision.script` in the Cellfile")
+                anyhow::anyhow!("shell provisioner requires `provision.script` in the Cellfile")
             })?;
             Ok(Box::new(ScriptProvisioner {
                 script: PathBuf::from(script),
@@ -151,7 +151,7 @@ impl Provisioner for NoneProvisioner {
     }
 }
 
-/// The shell-script provisioner (`kind = "script"`). It executes the script
+/// The shell-script provisioner (`kind = "shell"`). It executes the script
 /// declared at `provision.script` **inside the provisioning sandbox** — the
 /// cell rootfs is `/`, the Cellfile directory and declared host paths are
 /// read-only, and network egress is enabled. The script seeds the rootfs

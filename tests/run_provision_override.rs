@@ -2,7 +2,7 @@
 //!
 //! Covers overriding the Cellfile's declared provisioner from the command
 //! line for a single run. The override selects the provisioner kind and
-//! (for `script`) the script path, while preserving the Cellfile's declared
+//! (for `shell`) the script path, while preserving the Cellfile's declared
 //! `provision.host_paths` bootstrap allowance.
 
 use std::fs;
@@ -15,11 +15,11 @@ fn hotcell_bin() -> String {
     env!("CARGO_BIN_EXE_hotcell").to_string()
 }
 
-/// `--provision script:provision.sh` overrides a Cellfile that declared no
+/// `--provision shell:provision.sh` overrides a Cellfile that declared no
 /// provisioner (defaulting to `none`). The script provisions a tool the agent
 /// then runs.
 #[test]
-fn provision_override_runs_script_provisioner() {
+fn provision_override_runs_shell_provisioner() {
     let dir = TempDir::new().expect("create temp dir");
 
     // Cellfile with no provisioner declared — defaults to "none".
@@ -42,7 +42,7 @@ fn provision_override_runs_script_provisioner() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "--provision", "script:./provision.sh", "--", "/opt/bin/hello"])
+        .args(["run", "--provision", "shell:./provision.sh", "--", "/opt/bin/hello"])
         .output()
         .expect("run hotcell");
 
@@ -56,16 +56,16 @@ fn provision_override_runs_script_provisioner() {
     assert_eq!(stdout.trim_end(), "overridden");
 }
 
-/// `--provision none` overrides a Cellfile that declared `script`. The script
+/// `--provision none` overrides a Cellfile that declared `shell`. The script
 /// is ignored (no provisioning work), and the agent runs with an empty rootfs.
 #[test]
-fn provision_override_none_overrides_script() {
+fn provision_override_none_overrides_shell() {
     let dir = TempDir::new().expect("create temp dir");
 
-    // Cellfile declares the script provisioner, but we override to none.
+    // Cellfile declares the shell provisioner, but we override to none.
     fs::write(
         dir.path().join("Cellfile"),
-        "provisioner = script\nprovision.script = ./never-run.sh\nworkdir = /work\n",
+        "provision.type = shell\nprovision.script = ./never-run.sh\nworkdir = /work\n",
     )
     .unwrap();
 
@@ -98,7 +98,7 @@ fn provision_override_none_overrides_script() {
 }
 
 /// The override preserves the Cellfile's declared `provision.host_paths`: the
-/// overridden script provisioner can still read a host path the Cellfile
+/// overridden shell provisioner can still read a host path the Cellfile
 /// declared, even though the override only named the kind and script.
 #[test]
 fn provision_override_preserves_host_paths() {
@@ -106,8 +106,8 @@ fn provision_override_preserves_host_paths() {
     let host_tools = TempDir::new().expect("create host tools dir");
     fs::write(host_tools.path().join("marker.txt"), "from-host\n").unwrap();
 
-    // Cellfile declares host_paths but no script provisioner. We override to
-    // script on the CLI; the host_paths must still be honoured.
+    // Cellfile declares host_paths but no shell provisioner. We override to
+    // shell on the CLI; the host_paths must still be honoured.
     fs::write(
         dir.path().join("Cellfile"),
         format!(
@@ -138,7 +138,7 @@ fn provision_override_preserves_host_paths() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "--provision", "script:./provision.sh", "--", "/opt/bin/show"])
+        .args(["run", "--provision", "shell:./provision.sh", "--", "/opt/bin/show"])
         .output()
         .expect("run hotcell");
 
