@@ -7,8 +7,8 @@
 //! The sandbox's bind-mounted workdir appears as `/work`, so `pwd` prints
 //! `/work`.
 
-use std::process::Command;
 use std::fs;
+use std::process::Command;
 
 use tempfile::TempDir;
 
@@ -39,7 +39,11 @@ fn run_pwd_in_cell_prints_workdir() {
         "hotcell run failed: exit {:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
-    assert_eq!(stdout.trim_end(), "/work", "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        stdout.trim_end(),
+        "/work",
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }
 
 #[test]

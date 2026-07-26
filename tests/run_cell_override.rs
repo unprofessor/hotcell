@@ -127,8 +127,5 @@ fn file_and_cell_combine_independently() {
         !elsewhere.path().join(".cell").exists(),
         "state leaked beside the --file Cellfile"
     );
-    assert!(
-        !cwd.path().join(".cell").exists(),
-        "state leaked into cwd"
-    );
+    assert!(!cwd.path().join(".cell").exists(), "state leaked into cwd");
 }

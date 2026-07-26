@@ -161,7 +161,9 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
                 value: value.to_string(),
             });
         } else if key == "net.allow" {
-            decl.network.allowed_endpoints.push(parse_endpoint(value, line_no, path)?);
+            decl.network
+                .allowed_endpoints
+                .push(parse_endpoint(value, line_no, path)?);
         } else if key == "seed" {
             decl.files.push(parse_file_mapping(value, line_no, path)?);
         } else {
@@ -178,11 +180,7 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
 /// Split a line into `(key, value)` on the first `=`.
 fn split_kv(raw: &str, line_no: usize, path: &Path) -> anyhow::Result<(String, String)> {
     let Some(eq) = raw.find('=') else {
-        anyhow::bail!(
-            "{}:{}: expected `key = value`",
-            path.display(),
-            line_no
-        );
+        anyhow::bail!("{}:{}: expected `key = value`", path.display(), line_no);
     };
     Ok((raw[..eq].to_string(), raw[eq + 1..].to_string()))
 }
@@ -269,7 +267,10 @@ seed = ~/.gitconfig => /home/agent/.gitconfig
         assert_eq!(decl.workdir, "/work");
         assert_eq!(decl.packages, vec!["node", "curl"]);
         assert_eq!(
-            decl.environment.iter().map(|e| (e.key.as_str(), e.value.as_str())).collect::<Vec<_>>(),
+            decl.environment
+                .iter()
+                .map(|e| (e.key.as_str(), e.value.as_str()))
+                .collect::<Vec<_>>(),
             vec![("PATH", "/opt/node/bin:/usr/bin"), ("HOME", "/home/agent")]
         );
         assert_eq!(decl.network.allowed_endpoints.len(), 2);
@@ -284,7 +285,9 @@ seed = ~/.gitconfig => /home/agent/.gitconfig
     #[test]
     fn unknown_key_is_an_error() {
         let err = parse("frobnicate = yes", &dir()).unwrap_err();
-        assert!(err.to_string().contains("unknown Cellfile key `frobnicate`"));
+        assert!(err
+            .to_string()
+            .contains("unknown Cellfile key `frobnicate`"));
     }
 
     #[test]

@@ -137,7 +137,8 @@ pub fn build_provisioning_command(
         "--unshare-pid",
         "--share-net",
         "--die-with-parent",
-        "--chdir", &cellfile_mount,
+        "--chdir",
+        &cellfile_mount,
     ]);
 
     // Staging variables (encapsulate the staging scheme here).
@@ -196,13 +197,17 @@ pub fn build_agent_command(
         cmd.args(["--ro-bind", src, dst]);
     }
     cmd.args([
-        "--tmpfs", "/tmp",
-        "--proc", "/proc",
-        "--dev", "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
         "--unshare-pid",
         "--unshare-net",
         "--die-with-parent",
-        "--chdir", &workdir_str,
+        "--chdir",
+        &workdir_str,
     ]);
 
     // Clean environment: nothing from the host leaks in. Only the declared

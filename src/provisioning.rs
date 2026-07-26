@@ -21,6 +21,8 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::cell::Cell;
 use crate::cellfile::{CellDeclaration, Provisioner as ProvisionerSpec};
 use crate::isolation;
@@ -88,6 +90,31 @@ pub fn select_provisioner(spec: &ProvisionerSpec) -> anyhow::Result<Box<dyn Prov
         }
         other => Err(anyhow::anyhow!("unknown provisioner kind: {other}")),
     }
+}
+
+/// Compute the SHA-256 digest (lowercase hex) of the provisioning inputs for
+/// the declared spec, resolved against the Cellfile directory.
+///
+/// For the `shell` provisioner this is the digest of the script file's
+/// bytes — the thing the provisioner actually executes. For the `none`
+/// provisioner there is no script, so the digest is `None`; a matching
+/// `None` still lets a re-run skip provisioning when the declaration is
+/// unchanged. Returns `None` (rather than erroring) when the script path is
+/// not set, so callers can decide how to handle a missing script.
+pub fn provision_digest(
+    cellfile_directory: &Path,
+    spec: &ProvisionerSpec,
+) -> anyhow::Result<Option<String>> {
+    if spec.kind != "shell" {
+        return Ok(None);
+    }
+    let Some(script) = spec.script.as_ref() else {
+        return Ok(None);
+    };
+    let path = cellfile_directory.join(script);
+    let bytes = std::fs::read(&path)?;
+    let digest = Sha256::digest(&bytes);
+    Ok(Some(format!("{:x}", digest)))
 }
 
 /// Run provisioning for a cell against its Cellfile's declaration.

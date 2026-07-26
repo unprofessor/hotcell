@@ -19,6 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::cell::Cell;
 use crate::cellfile::{CellDeclaration, Cellfile};
 
@@ -50,22 +52,48 @@ pub fn log_file_path(cellfile_directory: &Path, name: &str) -> PathBuf {
     cell_state_dir(cellfile_directory, name).join("session.log")
 }
 
+/// The on-disk shape of `provisioned_as.json`: the declaration the cell was
+/// last provisioned with, plus a digest of the provisioning inputs used at
+/// that time. The digest lets a subsequent run skip re-provisioning when
+/// nothing has changed (see [`crate::provisioning`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProvisionedRecord {
+    declaration: CellDeclaration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script_digest: Option<String>,
+}
+
 /// Load a cell by `(Cellfile, name)`, deriving its durable state from the
 /// state directory. Returns a cell with `provisioned_as = None` and
 /// `failed = false` (i.e. unprovisioned) if no state exists yet.
+///
+/// For backward compatibility, a `provisioned_as.json` that is a bare
+/// `CellDeclaration` (written by older hotcell versions, before the digest
+/// was recorded) is accepted and treated as having no recorded digest — so
+/// the next run re-provisions once and then records a digest.
 pub fn load_cell(cellfile: &Cellfile, name: &str) -> anyhow::Result<Cell> {
     let dir = cell_state_dir(&cellfile.directory, name);
-    let provisioned_as = if dir.join(PROVISIONED_AS_FILE).exists() {
+    let (provisioned_as, script_digest) = if dir.join(PROVISIONED_AS_FILE).exists() {
         let data = std::fs::read(dir.join(PROVISIONED_AS_FILE))?;
-        Some(serde_json::from_slice::<CellDeclaration>(&data)?)
+        // Current format: `{ declaration, script_digest }`. Fall back to the
+        // legacy bare-declaration format so existing cells re-provision once
+        // rather than crashing.
+        match serde_json::from_slice::<ProvisionedRecord>(&data) {
+            Ok(record) => (Some(record.declaration), record.script_digest),
+            Err(_) => {
+                let decl = serde_json::from_slice::<CellDeclaration>(&data)?;
+                (Some(decl), None)
+            }
+        }
     } else {
-        None
+        (None, None)
     };
     let failed = dir.join(FAILED_MARKER).exists();
     Ok(Cell {
         cellfile_directory: cellfile.directory.clone(),
         name: name.to_string(),
         provisioned_as,
+        provisioned_script_digest: script_digest,
         failed,
         pending_program: None,
         pending_args: Vec::new(),
@@ -83,16 +111,23 @@ pub fn begin_provisioning(cellfile_directory: &Path, name: &str) -> anyhow::Resu
     Ok(())
 }
 
-/// Record a successful provisioning: write the declaration and clear any
-/// prior failure marker.
+/// Record a successful provisioning: write the declaration (and the digest
+/// of the provisioning inputs, when known) and clear any prior failure
+/// marker. The digest is stored inside `provisioned_as.json` alongside the
+/// declaration so a later run can skip re-provisioning when nothing changed.
 pub fn mark_provisioned(
     cellfile_directory: &Path,
     name: &str,
     declaration: &CellDeclaration,
+    script_digest: Option<&str>,
 ) -> anyhow::Result<()> {
     let dir = cell_state_dir(cellfile_directory, name);
     std::fs::create_dir_all(&dir)?;
-    let data = serde_json::to_vec_pretty(declaration)?;
+    let record = ProvisionedRecord {
+        declaration: declaration.clone(),
+        script_digest: script_digest.map(str::to_string),
+    };
+    let data = serde_json::to_vec_pretty(&record)?;
     std::fs::write(dir.join(PROVISIONED_AS_FILE), data)?;
     remove_if_exists(dir.join(FAILED_MARKER))?;
     Ok(())

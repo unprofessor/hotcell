@@ -16,6 +16,39 @@ fn hotcell_bin() -> String {
     env!("CARGO_BIN_EXE_hotcell").to_string()
 }
 
+/// Run `hotcell run <program>` in `dir`, returning (status, stdout, stderr).
+fn run(dir: &std::path::Path, program: &str) -> (std::process::Output, String, String) {
+    let output = Command::new(hotcell_bin())
+        .current_dir(dir)
+        .args(["run", program])
+        .output()
+        .expect("run hotcell");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    (output, stdout, stderr)
+}
+
+fn write_shell_cellfile(dir: &std::path::Path) {
+    fs::write(
+        dir.join("Cellfile"),
+        "provision.type = shell\nprovision.script = ./provision.sh\nworkdir = /work\n",
+    )
+    .expect("write Cellfile");
+    fs::write(
+        dir.join("provision.sh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n\
+         mkdir -p \"$HOTCELL_CELL_ROOT/opt/bin\" \"$HOTCELL_WORKDIR_HOST\"\n\
+         printf '#!/usr/bin/env bash\necho provisioned-marker\n' > \"$HOTCELL_CELL_ROOT/opt/bin/hello\"\n\
+         chmod +x \"$HOTCELL_CELL_ROOT/opt/bin/hello\"\n",
+    )
+    .expect("write provision.sh");
+    fs::set_permissions(
+        dir.join("provision.sh"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod provision.sh");
+}
+
 #[test]
 fn script_provisioner_installs_tool_visible_in_sandbox() {
     let dir = TempDir::new().expect("create temp dir");
@@ -71,6 +104,67 @@ fn script_provisioner_installs_tool_visible_in_sandbox() {
 }
 
 #[test]
+fn shell_provisioner_skips_when_script_unchanged() {
+    let dir = TempDir::new().expect("create temp dir");
+    write_shell_cellfile(dir.path());
+
+    // First run provisions from scratch.
+    let (output, stdout, stderr) = run(dir.path(), "/opt/bin/hello");
+    assert!(
+        output.status.success(),
+        "first run failed: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+    assert_eq!(stdout.trim_end(), "provisioned-marker");
+    assert!(
+        !stderr.contains("skipping provisioning"),
+        "first run should not skip: {stderr}"
+    );
+
+    // Second run with the same Cellfile and script: provisioning is skipped,
+    // but the provisioned tool is still usable.
+    let (output, stdout, stderr) = run(dir.path(), "/opt/bin/hello");
+    assert!(
+        output.status.success(),
+        "second run failed: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+    assert_eq!(stdout.trim_end(), "provisioned-marker");
+    assert!(
+        stderr.contains("skipping provisioning"),
+        "second run should skip re-provisioning: {stderr}"
+    );
+
+    // Touching the script (changing its bytes) forces a re-provision.
+    fs::write(
+        dir.path().join("provision.sh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n\
+         mkdir -p \"$HOTCELL_CELL_ROOT/opt/bin\" \"$HOTCELL_WORKDIR_HOST\"\n\
+         printf '#!/usr/bin/env bash\necho provisioned-marker\n' > \"$HOTCELL_CELL_ROOT/opt/bin/hello\"\n\
+         chmod +x \"$HOTCELL_CELL_ROOT/opt/bin/hello\"\n\
+         # a harmless change to the script body\ntrue\n",
+    )
+    .expect("rewrite provision.sh");
+    fs::set_permissions(
+        dir.path().join("provision.sh"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod provision.sh");
+
+    let (output, stdout, stderr) = run(dir.path(), "/opt/bin/hello");
+    assert!(
+        output.status.success(),
+        "third run failed: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+    assert_eq!(stdout.trim_end(), "provisioned-marker");
+    assert!(
+        !stderr.contains("skipping provisioning"),
+        "changed script should re-provision: {stderr}"
+    );
+}
+
+#[test]
 fn script_provisioner_failure_fails_provisioning() {
     let dir = TempDir::new().expect("create temp dir");
 
@@ -122,11 +216,7 @@ fn script_provisioner_without_script_path_is_config_error() {
     let dir = TempDir::new().expect("create temp dir");
 
     // Selects the shell provisioner but omits provision.script.
-    fs::write(
-        dir.path().join("Cellfile"),
-        "provision.type = shell\n",
-    )
-    .expect("write Cellfile");
+    fs::write(dir.path().join("Cellfile"), "provision.type = shell\n").expect("write Cellfile");
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())

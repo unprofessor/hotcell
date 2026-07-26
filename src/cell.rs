@@ -47,6 +47,13 @@ pub struct Cell {
     /// cell is provisioned. Loaded from `provisioned_as.json`.
     pub provisioned_as: Option<CellDeclaration>,
 
+    /// SHA-256 digest of the provisioning script the cell was last provisioned
+    /// with (hex), recorded in `provisioned_as.json`. `None` for provisioners
+    /// with no script (e.g. `kind = "none"`) or for records written before
+    /// digests were tracked. Used to skip re-provisioning when the script is
+    /// unchanged.
+    pub provisioned_script_digest: Option<String>,
+
     /// True when the last provisioning attempt failed and no provisioned
     /// environment exists. Derived from the presence of a `failed` marker.
     pub failed: bool,
@@ -64,6 +71,7 @@ impl Cell {
             cellfile_directory,
             name,
             provisioned_as: None,
+            provisioned_script_digest: None,
             failed: false,
             pending_program: None,
             pending_args: Vec::new(),

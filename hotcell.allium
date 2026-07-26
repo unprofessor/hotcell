@@ -113,6 +113,13 @@ entity Cell {
     -- environment the agent actually sees. Set when provisioning succeeds.
     provisioned_as: CellDeclaration when status = provisioned
 
+    -- A fingerprint of the provisioner's script content, recorded at
+    -- provisioning time. Used to detect that the script a cell was
+    -- provisioned with is unchanged, so a re-run can skip re-provisioning
+    -- (see provisioner_inputs_unchanged). null for provisioners with no
+    -- script (kind = "none").
+    provisioned_script_digest: String? when status = provisioned
+
     -- The program and arguments to run once provisioning completes. Carried
     -- through the provisioning phase so the session can start on success.
     pending_program: String when status = provisioning
@@ -125,6 +132,17 @@ entity Cell {
     -- current declaration. False (stale) when the Cellfile has changed since
     -- the last provisioning.
     is_current: provisioned_as = cellfile.declaration
+
+    -- True when the provisioner's inputs are the same as when the cell was
+    -- last provisioned. provisioner_digest(provisioner, directory) is a
+    -- black box function returning a fingerprint of the provisioner's script
+    -- content at {directory}/{script}, or null when the provisioner has no
+    -- script (kind = "none"); it is pure and deterministic for the same
+    -- inputs within a rule execution. For a no-script provisioner both sides
+    -- are null, so this is true. Combined with is_current, this is the
+    -- condition under which re-provisioning would only reproduce the same
+    -- rootfs and may be skipped.
+    provisioner_inputs_unchanged: provisioned_script_digest = provisioner_digest(cellfile.declaration.provisioner, cellfile.directory)
 
     transitions status {
         unprovisioned -> provisioning
@@ -212,14 +230,34 @@ rule ReprovisionFromFailed {
         cell.pending_args = args
 }
 
+rule SkipProvisioningWhenUnchanged {
+    when: RunCell(cellfile, name, program, args)
+    requires: exists Cell{cellfile, name}
+    let cell = Cell{cellfile, name}
+    requires: cell.status = provisioned
+    requires: cell.is_current
+    requires: cell.provisioner_inputs_unchanged
+    ensures:
+        Session.created(
+            cell: cell,
+            program: program,
+            args: args,
+            status: running,
+            started_at: now,
+            log_file: log_file_path(cell)
+        )
+}
+
 rule ReconcileFromProvisioned {
     when: RunCell(cellfile, name, program, args)
     requires: exists Cell{cellfile, name}
     let cell = Cell{cellfile, name}
     requires: cell.status = provisioned
+    requires: not (cell.is_current and cell.provisioner_inputs_unchanged)
     ensures:
         cell.status = provisioning
         cell.provisioned_as = null
+        cell.provisioned_script_digest = null
         cell.pending_program = program
         cell.pending_args = args
 }
@@ -236,6 +274,7 @@ rule ProvisionSucceeds {
     ensures:
         cell.status = provisioned
         cell.provisioned_as = declaration
+        cell.provisioned_script_digest = provisioner_digest(declaration.provisioner, cell.cellfile.directory)
         cell.pending_program = null
         cell.pending_args = null
         Session.created(
@@ -281,6 +320,7 @@ rule DestroyCell {
     ensures:
         cell.status = unprovisioned
         cell.provisioned_as = null
+        cell.provisioned_script_digest = null
         cell.provisioning_error = null
 }
 

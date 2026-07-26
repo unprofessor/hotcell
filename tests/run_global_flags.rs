@@ -23,7 +23,13 @@ fn destroy_honors_cell_flag() {
     // Provision a cell with state rooted in cell_dir.
     let run = Command::new(hotcell_bin())
         .current_dir(cwd.path())
-        .args(["run", "--cell", cell_dir.path().to_str().unwrap(), "--", "/bin/pwd"])
+        .args([
+            "run",
+            "--cell",
+            cell_dir.path().to_str().unwrap(),
+            "--",
+            "/bin/pwd",
+        ])
         .output()
         .expect("run hotcell");
     assert!(run.status.success(), "provisioning run failed");
@@ -63,15 +69,25 @@ fn status_honors_cell_flag() {
     // Provision a cell with state in cell_dir, plus a second named cell.
     Command::new(hotcell_bin())
         .current_dir(cwd.path())
-        .args(["run", "--cell", cell_dir.path().to_str().unwrap(), "--", "/bin/pwd"])
+        .args([
+            "run",
+            "--cell",
+            cell_dir.path().to_str().unwrap(),
+            "--",
+            "/bin/pwd",
+        ])
         .output()
         .expect("run hotcell");
     Command::new(hotcell_bin())
         .current_dir(cwd.path())
         .args([
-            "run", "--name", "alt",
-            "--cell", cell_dir.path().to_str().unwrap(),
-            "--", "/bin/pwd",
+            "run",
+            "--name",
+            "alt",
+            "--cell",
+            cell_dir.path().to_str().unwrap(),
+            "--",
+            "/bin/pwd",
         ])
         .output()
         .expect("run hotcell alt");
@@ -88,7 +104,10 @@ fn status_honors_cell_flag() {
         status.status.success(),
         "status --cell failed: stderr: {stderr}"
     );
-    assert!(stdout.contains("default"), "expected 'default' in status: {stdout}");
+    assert!(
+        stdout.contains("default"),
+        "expected 'default' in status: {stdout}"
+    );
     assert!(stdout.contains("alt"), "expected 'alt' in status: {stdout}");
 
     // And status without --cell (looking in cwd) should report no cells,
@@ -119,7 +138,11 @@ fn status_honors_file_flag() {
     // and report no cells, since none have been provisioned there.
     let status = Command::new(hotcell_bin())
         .current_dir(cwd.path())
-        .args(["status", "--file", elsewhere.path().join("Cellfile").to_str().unwrap()])
+        .args([
+            "status",
+            "--file",
+            elsewhere.path().join("Cellfile").to_str().unwrap(),
+        ])
         .output()
         .expect("status hotcell");
 
@@ -129,7 +152,10 @@ fn status_honors_file_flag() {
         status.status.success(),
         "status --file failed: stderr: {stderr}"
     );
-    assert!(stdout.contains("no cells"), "expected 'no cells', got: {stdout}");
+    assert!(
+        stdout.contains("no cells"),
+        "expected 'no cells', got: {stdout}"
+    );
 
     // status without --file should fail: no Cellfile in cwd.
     let bare = Command::new(hotcell_bin())

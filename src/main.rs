@@ -12,14 +12,14 @@
 //! - [`cellfile`]: reading the Cellfile declaration.
 //! - [`cli`]: the developer-facing command-line interface.
 
-mod cellfile;
 mod cell;
-mod session;
-mod provisioning;
-mod isolation;
-mod firewall;
-mod state;
+mod cellfile;
 mod cli;
+mod firewall;
+mod isolation;
+mod provisioning;
+mod session;
+mod state;
 
 use anyhow::Result;
 

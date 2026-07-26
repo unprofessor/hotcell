@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 
 use crate::cell::CellStatus;
 use crate::cellfile::Cellfile;
-use crate::provisioning::{provision, ProvisionOutcome};
+use crate::provisioning::{provision, provision_digest, ProvisionOutcome};
 use crate::state;
 
 #[derive(Parser)]
@@ -62,9 +62,11 @@ pub fn run() -> Result<()> {
         cell: cli.cell.as_deref(),
     };
     match cli.command {
-        Command::Run { name, program, args } => {
-            run_cell(&ctx, &name, &program, &args)
-        }
+        Command::Run {
+            name,
+            program,
+            args,
+        } => run_cell(&ctx, &name, &program, &args),
         Command::Destroy { name } => destroy_cell(&ctx, &name),
         Command::Status => status(&ctx),
     }
@@ -113,24 +115,47 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     cell.pending_program = Some(program.to_string());
     cell.pending_args = args.to_vec();
 
-    // Enter the provisioning phase: clear durable markers so a crash leaves
-    // the cell unprovisioned rather than stuck.
-    state::begin_provisioning(&cellfile.directory, name)?;
+    // Skip re-provisioning when the cell is already provisioned with the
+    // current declaration AND the provisioning inputs are unchanged. The
+    // shell provisioner records a SHA-256 of its script in
+    // `provisioned_as.json`; if that digest still matches the script on
+    // disk, re-running the provisioner would only reproduce the same rootfs,
+    // so we short-circuit. A mismatch (or a legacy record with no digest)
+    // falls through to a full re-provision.
+    let current_digest = provision_digest(&cellfile.directory, &declaration.provisioner)?;
+    let already_current =
+        cell.is_current(&declaration) && cell.provisioned_script_digest == current_digest;
+    if already_current {
+        eprintln!(
+            "cell {:?} already provisioned with current inputs; skipping provisioning",
+            name
+        );
+    } else {
+        // Enter the provisioning phase: clear durable markers so a crash leaves
+        // the cell unprovisioned rather than stuck.
+        state::begin_provisioning(&cellfile.directory, name)?;
 
-    // Provisioning phase: the provisioner seeds the
-    // cell's rootfs. Mirrors ProvisionSucceeds / ProvisionFails and the
-    // ProvisioningLogsToConsole guarantee.
-    let outcome = provision(&cell, &declaration)?;
-    let declaration = match outcome {
-        ProvisionOutcome::Succeeded(d) => d,
-        ProvisionOutcome::Failed(err) => {
-            state::mark_failed(&cellfile.directory, name)?;
-            eprintln!("provisioning failed: {err}");
-            std::process::exit(1);
-        }
-    };
-    state::mark_provisioned(&cellfile.directory, name, &declaration)?;
-    cell.provisioned_as = Some(declaration);
+        // Provisioning phase: the provisioner seeds the
+        // cell's rootfs. Mirrors ProvisionSucceeds / ProvisionFails and the
+        // ProvisioningLogsToConsole guarantee.
+        let outcome = provision(&cell, &declaration)?;
+        let declaration = match outcome {
+            ProvisionOutcome::Succeeded(d) => d,
+            ProvisionOutcome::Failed(err) => {
+                state::mark_failed(&cellfile.directory, name)?;
+                eprintln!("provisioning failed: {err}");
+                std::process::exit(1);
+            }
+        };
+        state::mark_provisioned(
+            &cellfile.directory,
+            name,
+            &declaration,
+            current_digest.as_deref(),
+        )?;
+        cell.provisioned_as = Some(declaration);
+        cell.provisioned_script_digest = current_digest;
+    }
 
     // Launch the agent inside the isolated sandbox, relaying stdio.
     // Mirrors RelayOnly / CleanEnvironment / ProvisionedEnvironment.
@@ -169,9 +194,7 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
 
     let log_file = state::log_file_path(&cellfile.directory, name);
 
-    let mut cmd = crate::isolation::build_agent_command(
-        &cell_fs, &workdir, &env, program, args,
-    );
+    let mut cmd = crate::isolation::build_agent_command(&cell_fs, &workdir, &env, program, args);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -179,8 +202,7 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     eprintln!("session log: {}", log_file.display());
 
     let mut child = cmd.spawn()?;
-    let exit_status = child.wait()?
-;
+    let exit_status = child.wait()?;
 
     if !exit_status.success() {
         eprintln!(
@@ -197,7 +219,10 @@ fn destroy_cell(ctx: &ResolveCtx, name: &str) -> Result<()> {
     let cellfile = resolve(ctx)?;
     let cell = state::load_cell(&cellfile, name)?;
     // Mirrors DestroyCell: only provisioned or failed cells can be destroyed.
-    if !matches!(cell.status(), CellStatus::Provisioned | CellStatus::ProvisioningFailed) {
+    if !matches!(
+        cell.status(),
+        CellStatus::Provisioned | CellStatus::ProvisioningFailed
+    ) {
         bail!(
             "cell {:?} is not in a destroyable state ({})",
             name,

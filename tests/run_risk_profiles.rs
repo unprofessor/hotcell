@@ -148,9 +148,8 @@ fn agent_has_clean_environment() {
 
     // Set a unique host env var that must NOT appear inside the cell.
     let host_leak = "HOTCELL_HOST_LEAK_SHOULD_NOT_APPEAR";
-    let agent_check = format!(
-        "test \"$HOTCELL_TEST_VAR\" = provisioned && test -z \"${host_leak}\""
-    );
+    let agent_check =
+        format!("test \"$HOTCELL_TEST_VAR\" = provisioned && test -z \"${host_leak}\"");
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())

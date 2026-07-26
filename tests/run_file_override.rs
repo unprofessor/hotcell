@@ -41,7 +41,11 @@ fn file_flag_reads_cellfile_at_explicit_path() {
         "hotcell run --file failed: exit {:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
-    assert_eq!(stdout.trim_end(), "/work", "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        stdout.trim_end(),
+        "/work",
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }
 
 /// `-f` is the short form of `--file`.
@@ -71,7 +75,11 @@ fn short_flag_f_reads_cellfile_at_explicit_path() {
         "hotcell run -f failed: exit {:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
-    assert_eq!(stdout.trim_end(), "/work", "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        stdout.trim_end(),
+        "/work",
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }
 
 /// `--file` pointing at a non-existent file is a clear error, not a panic.
