@@ -5,6 +5,7 @@
 //! `hotcell run` blocks until the program exits, relaying stdio faithfully
 //! and passing the exit code through.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::{bail, Result};
@@ -18,6 +19,16 @@ use crate::state;
 #[derive(Parser)]
 #[command(name = "hotcell", version, about = "An AI coding agent sandbox")]
 struct Cli {
+    /// Path to the Cellfile, overriding the conventional `$PWD/Cellfile`.
+    /// Applies to every subcommand. The cell's state directory lives
+    /// alongside the given file unless `--cell` overrides it.
+    #[arg(short = 'f', long = "file", global = true, value_name = "CELLFILE")]
+    file: Option<String>,
+    /// Cell directory, overriding the Cellfile's parent as the root for cell
+    /// state (`.cell/...`). Applies to every subcommand. Use `--file` to read
+    /// a Cellfile from one place while keeping state in another.
+    #[arg(short = 'c', long = "cell", global = true, value_name = "DIR")]
+    cell: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -29,15 +40,6 @@ enum Command {
         /// Cell name. Defaults to "default".
         #[arg(long, default_value = state::DEFAULT_CELL_NAME)]
         name: String,
-        /// Path to the Cellfile, overriding the conventional `$PWD/Cellfile`.
-        /// The cell's state directory lives alongside the given file.
-        #[arg(short = 'f', long = "file", value_name = "CELLFILE")]
-        file: Option<String>,
-        /// Cell directory, overriding the Cellfile's parent as the root for
-        /// cell state (`.hotcell/...`). Use `--file` to read a Cellfile from
-        /// one place while keeping state in another.
-        #[arg(short = 'c', long = "cell", value_name = "DIR")]
-        cell: Option<String>,
         /// Program to execute inside the cell.
         program: String,
         /// Arguments to pass to the program.
@@ -49,32 +51,48 @@ enum Command {
         #[arg(long, default_value = state::DEFAULT_CELL_NAME)]
         name: String,
     },
-    /// List cells for the Cellfile in the current directory.
+    /// List cells for the Cellfile.
     Status,
 }
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    let ctx = ResolveCtx {
+        file: cli.file.as_deref(),
+        cell: cli.cell.as_deref(),
+    };
     match cli.command {
-        Command::Run { name, file, cell, program, args } => {
-            run_cell(&name, file.as_deref(), cell.as_deref(), &program, &args)
+        Command::Run { name, program, args } => {
+            run_cell(&ctx, &name, &program, &args)
         }
-        Command::Destroy { name } => destroy_cell(&name),
-        Command::Status => status(),
+        Command::Destroy { name } => destroy_cell(&ctx, &name),
+        Command::Status => status(&ctx),
     }
 }
 
-fn current_cellfile(override_path: Option<&str>) -> Result<Cellfile> {
-    match override_path {
-        Some(p) => {
-            let path = std::path::Path::new(p);
-            Ok(Cellfile::read_at(path)?)
-        }
+/// Root-level context: where to read the Cellfile from and where to root
+/// cell state. Both default to the Cellfile's parent (or `$PWD`).
+struct ResolveCtx<'a> {
+    file: Option<&'a str>,
+    cell: Option<&'a str>,
+}
+
+/// Resolve the Cellfile and its cell directory from the root-level context.
+/// `--file` selects the Cellfile path; `--cell` overrides the cell directory
+/// (the root for state) independently. By default both derive from
+/// `$PWD/Cellfile`.
+fn resolve(ctx: &ResolveCtx) -> Result<Cellfile> {
+    let mut cellfile = match ctx.file {
+        Some(p) => Cellfile::read_at(std::path::Path::new(p))?,
         None => {
             let cwd = std::env::current_dir()?;
-            Ok(Cellfile::read(&cwd)?)
+            Cellfile::read(&cwd)?
         }
+    };
+    if let Some(dir) = ctx.cell {
+        cellfile.directory = PathBuf::from(dir);
     }
+    Ok(cellfile)
 }
 
 fn now_unix() -> u64 {
@@ -84,22 +102,8 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn run_cell(
-    name: &str,
-    cellfile_path: Option<&str>,
-    cell_dir: Option<&str>,
-    program: &str,
-    args: &[String],
-) -> Result<()> {
-    let mut cellfile = current_cellfile(cellfile_path)?;
-
-    // Override the cell directory (the root for state) independently of
-    // where the Cellfile was read from. By default state lives alongside
-    // the Cellfile; `--cell` decouples the two so a Cellfile can be read
-    // from one place while state is kept in another.
-    if let Some(dir) = cell_dir {
-        cellfile.directory = std::path::PathBuf::from(dir);
-    }
+fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Result<()> {
+    let cellfile = resolve(ctx)?;
 
     let declaration = cellfile.declaration.clone();
 
@@ -189,8 +193,8 @@ fn run_cell(
     std::process::exit(code);
 }
 
-fn destroy_cell(name: &str) -> Result<()> {
-    let cellfile = current_cellfile(None)?;
+fn destroy_cell(ctx: &ResolveCtx, name: &str) -> Result<()> {
+    let cellfile = resolve(ctx)?;
     let cell = state::load_cell(&cellfile, name)?;
     // Mirrors DestroyCell: only provisioned or failed cells can be destroyed.
     if !matches!(cell.status(), CellStatus::Provisioned | CellStatus::ProvisioningFailed) {
@@ -205,12 +209,11 @@ fn destroy_cell(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn status() -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let cellfile = Cellfile::read(&cwd)?;
-    let names = state::list_cell_names(&cwd)?;
+fn status(ctx: &ResolveCtx) -> Result<()> {
+    let cellfile = resolve(ctx)?;
+    let names = state::list_cell_names(&cellfile.directory)?;
     if names.is_empty() {
-        println!("no cells in {}", cwd.display());
+        println!("no cells in {}", cellfile.directory.display());
         return Ok(());
     }
     for name in names {
