@@ -41,12 +41,15 @@ pub struct Cell {
     /// `status == Provisioned`.
     pub provisioned_as: Option<CellDeclaration>,
 
-    /// The program and args to run once provisioning completes. Carried
-    /// through the provisioning phase.
+    // The fields below are in-process state for the current invocation only.
+    // hotcell holds the program/args in memory across the provisioning phase;
+    // the provisioning error is surfaced on the console at failure time. None
+    // of these are persisted.
+    #[serde(skip)]
     pub pending_program: Option<String>,
+    #[serde(skip)]
     pub pending_args: Vec<String>,
-
-    /// Description of what went wrong when provisioning fails.
+    #[serde(skip)]
     pub provisioning_error: Option<String>,
 }
 
