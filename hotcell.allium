@@ -4,7 +4,7 @@
 -- Scope: Hotcell — an AI coding agent sandbox
 -- Includes: Cell (isolated environment), Cellfile (declaration source),
 --           Session (program invocation), provisioning, network firewall,
---           filesystem isolation
+--           filesystem isolation, logging
 -- Excludes:
 --   - Authentication and authorization of callers
 --   - Billing, quota, resource limits
@@ -31,6 +31,12 @@ external entity Cellfile {
     -- current file. Contains a single CellDeclaration; it does not define names.
     directory: String
     declaration: CellDeclaration
+}
+
+external entity ProvisioningProcess {
+    -- hotcell's internal provisioning system: installs packages, seeds files,
+    -- configures the network firewall and environment. Reports success or
+    -- failure as outcomes; the spec does not prescribe how provisioning works.
 }
 
 ------------------------------------------------------------
@@ -75,14 +81,22 @@ entity Cell {
     -- so multiple cells can be created from a single Cellfile.
     cellfile: Cellfile
     name: String
-    status: unprovisioned | provisioned
+    status: unprovisioned | provisioning | provisioned | provisioning_failed
 
     sessions: Session with cell = this
     active_sessions: sessions where status = running
 
     -- The declaration the cell was last provisioned with — i.e. the
-    -- environment the agent actually sees. Set on provision, reconciled on run.
+    -- environment the agent actually sees. Set when provisioning succeeds.
     provisioned_as: CellDeclaration when status = provisioned
+
+    -- The program and arguments to run once provisioning completes. Carried
+    -- through the provisioning phase so the session can start on success.
+    pending_program: String when status = provisioning
+    pending_args: List<String> when status = provisioning
+
+    -- Description of what went wrong when provisioning fails.
+    provisioning_error: String when status = provisioning_failed
 
     -- True (fresh) when the provisioned environment matches the Cellfile's
     -- current declaration. False (stale) when the Cellfile has changed since
@@ -90,7 +104,12 @@ entity Cell {
     is_current: provisioned_as = cellfile.declaration
 
     transitions status {
-        unprovisioned -> provisioned
+        unprovisioned -> provisioning
+        provisioning -> provisioned
+        provisioning -> provisioning_failed
+        provisioning_failed -> provisioning
+        provisioning_failed -> unprovisioned
+        provisioned -> provisioning
         provisioned -> unprovisioned
     }
 }
@@ -103,6 +122,11 @@ entity Session {
     started_at: Timestamp
     ended_at: Timestamp when status = completed
     exit_code: Integer when status = completed
+
+    -- Path to hotcell's log file for this session. While the agent runs,
+    -- hotcell redirects its own logging here to avoid disturbing the agent's
+    -- terminal interface. The path is derived from the cell's state directory.
+    log_file: String when status = running
 
     transitions status {
         running -> completed
@@ -124,45 +148,92 @@ config {
 -- Rules
 ------------------------------------------------------------
 
--- First run for a name: create the cell, provision it from the Cellfile's
--- current declaration, and start a session.
+-- Run initiation: every hotcell run enters the provisioning phase first.
+-- The cell transitions to "provisioning" and the provisioning process
+-- attempts to bring the environment in line with the Cellfile.
 
-rule CreateAndProvisionOnFirstRun {
+rule CreateCellForProvisioning {
     when: RunCell(cellfile, name, program, args)
     requires: not exists Cell{cellfile, name}
-    let declaration = cellfile.declaration
     ensures:
-        let cell = Cell.created(cellfile: cellfile, name: name, status: provisioned, provisioned_as: declaration)
-        Session.created(cell: cell, program: program, args: args, status: running, started_at: now)
+        Cell.created(
+            cellfile: cellfile,
+            name: name,
+            status: provisioning,
+            pending_program: program,
+            pending_args: args
+        )
 }
 
--- Existing cell, not yet provisioned: provision from the Cellfile's current
--- declaration and start a session.
-
-rule ProvisionExistingCell {
+rule ReprovisionFromUnprovisioned {
     when: RunCell(cellfile, name, program, args)
     requires: exists Cell{cellfile, name}
     let cell = Cell{cellfile, name}
     requires: cell.status = unprovisioned
-    let declaration = cellfile.declaration
     ensures:
-        cell.status = provisioned
-        cell.provisioned_as = declaration
-        Session.created(cell: cell, program: program, args: args, status: running, started_at: now)
+        cell.status = provisioning
+        cell.pending_program = program
+        cell.pending_args = args
 }
 
--- Existing provisioned cell: reconcile the provisioned environment to the
--- Cellfile's current declaration, then start a session.
+rule ReprovisionFromFailed {
+    when: RunCell(cellfile, name, program, args)
+    requires: exists Cell{cellfile, name}
+    let cell = Cell{cellfile, name}
+    requires: cell.status = provisioning_failed
+    ensures:
+        cell.status = provisioning
+        cell.provisioning_error = null
+        cell.pending_program = program
+        cell.pending_args = args
+}
 
-rule RunProvisionedCell {
+rule ReconcileFromProvisioned {
     when: RunCell(cellfile, name, program, args)
     requires: exists Cell{cellfile, name}
     let cell = Cell{cellfile, name}
     requires: cell.status = provisioned
-    let declaration = cellfile.declaration
     ensures:
+        cell.status = provisioning
+        cell.provisioned_as = null
+        cell.pending_program = program
+        cell.pending_args = args
+}
+
+-- Provisioning outcomes: the provisioning process reports success or failure.
+-- On success, the cell is provisioned and a session starts. On failure, the
+-- cell enters provisioning_failed and no session starts.
+
+rule ProvisionSucceeds {
+    when: ProvisioningSucceeded(cell, declaration)
+    requires: cell.status = provisioning
+    let program = cell.pending_program
+    let args = cell.pending_args
+    ensures:
+        cell.status = provisioned
         cell.provisioned_as = declaration
-        Session.created(cell: cell, program: program, args: args, status: running, started_at: now)
+        cell.pending_program = null
+        cell.pending_args = null
+        Session.created(
+            cell: cell,
+            program: program,
+            args: args,
+            status: running,
+            started_at: now,
+            log_file: log_file_path(cell)
+        )
+}
+
+rule ProvisionFails {
+    when: ProvisioningFailed(cell, error)
+    requires: cell.status = provisioning
+    let program = cell.pending_program
+    let args = cell.pending_args
+    ensures:
+        cell.status = provisioning_failed
+        cell.provisioning_error = error
+        cell.pending_program = null
+        cell.pending_args = null
 }
 
 -- Session completes when the program exits.
@@ -174,17 +245,19 @@ rule SessionCompletes {
         session.status = completed
         session.ended_at = now
         session.exit_code = exit_code
+        session.log_file = null
 }
 
 -- Destroying: tear down the provisioned filesystem, return to unprovisioned.
 
 rule DestroyCell {
     when: DestroyCellCommand(cell)
-    requires: cell.status = provisioned
+    requires: cell.status in {provisioned, provisioning_failed}
     requires: cell.active_sessions.count = 0
     ensures:
         cell.status = unprovisioned
         cell.provisioned_as = null
+        cell.provisioning_error = null
 }
 
 ------------------------------------------------------------
@@ -239,6 +312,34 @@ surface DeveloperCLI {
         DestroyCellCommand(cell)
             when cell.cellfile = cwd
 
+    @guarantee RelayOnly
+        -- hotcell run blocks until the program exits, relaying stdin/stdout/stderr
+        -- to the developer's terminal and faithfully passing the exit code. There is
+        -- no attach/detach: a session's stdio is tied to the invocation that started
+        -- it. Detaching and reattaching later is out of scope (use a terminal
+        -- multiplexer if you need that).
+
+    @guarantee ProvisioningLogsToConsole
+        -- During provisioning, hotcell logs progress and errors to the console.
+        -- If provisioning fails, the error is shown on the console and no session
+        -- starts.
+
+    @guarantee SessionLogsToFile
+        -- Once the agent starts, hotcell redirects its own logging to a file and
+        -- prints the log file's location to the console. This keeps the agent's
+        -- terminal interface (TUI) undisturbed while hotcell runs.
+
+    @guarantee PostSessionReport
+        -- After the agent exits, hotcell reports to the console whether errors
+        -- occurred and the session's final status.
+
+    @guarantee FilesPersistAfterSession
+        -- Files the agent produces during a session remain in the cell's
+        -- filesystem after the session ends. They are accessible to the
+        -- developer until the cell is destroyed. The cell's filesystem is
+        -- backed by the state directory, so agent-produced files live
+        -- alongside other cell state.
+
     @guarantee StateColocatedWithCellfile
         -- Cell state persists in the state directory ({directory}/{state_dir})
         -- alongside the Cellfile, so it follows the Cellfile across directory
@@ -249,6 +350,19 @@ surface DeveloperCLI {
         -- Convention over configuration: hotcell looks for $PWD/Cellfile.
         -- The default cell name is "default"; additional names let a developer
         -- create more than one cell from a single Cellfile.
+}
+
+-- The provisioning process reports outcomes. This is not a developer action;
+-- it is an internal process that succeeds or fails.
+
+surface ProvisioningRuntime {
+    facing provisioner: ProvisioningProcess
+
+    context cell: Cell where status = provisioning
+
+    provides:
+        ProvisioningSucceeded(cell, declaration)
+        ProvisioningFailed(cell, error)
 }
 
 -- The sandbox runtime reports program exit. This is not a developer action;
@@ -276,8 +390,4 @@ deferred SessionTermination.terminate    -- see: detailed/session-termination.al
 ------------------------------------------------------------
 
 open question "When a session is terminated, does it reach the same 'completed' state as a natural exit, or a distinct 'terminated' state with its own exit semantics?"
-open question "Can a developer exec into a running session (attach), or is the session's stdout/stderr strictly relay-only?"
-open question "Should network policy support port-level restrictions, or are hostname/domain-level allowlist entries sufficient?"
-open question "Does provisioning have observable failure states (e.g. a package fails to install), and if so what does the developer see?"
-open question "Should files produced by the agent be retrievable from the sandbox after the session ends but before destroying?"
-open question "When a Cellfile is removed or its declaration becomes unresolvable, are existing provisioned cells marked stale or left as-is until next run?"
+open question "Network policy granularity: hostname/domain allowlist is sufficient for v1, but further research is needed on whether port-level restrictions, protocol restrictions, or path-level restrictions are required for real-world agent workflows"
