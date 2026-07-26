@@ -409,6 +409,15 @@ surface ProvisioningRuntime {
         -- run directly on the host; it is sandboxed just as the agent is, but
         -- under a different permissions profile.
 
+    @guarantee HostPathsStaged
+        -- Host paths the provisioner may read (the Cellfile directory and
+        -- provisioner.host_paths) are bind-mounted under a neutral staging
+        -- prefix inside the provisioning sandbox, not at their original host
+        -- paths. This prevents the sandbox runtime from leaving a skeleton of
+        -- the host's directory structure (e.g. /home/<user>/...) in the cell
+        -- rootfs, which would leak the host username and layout to the agent.
+        -- The staging prefix is removed from the rootfs after provisioning.
+
     @guarantee BootstrapRiskProfile
         -- The provisioner runs a trusted, developer-authored process and so
         -- carries a broader risk profile than the agent: read-only access to
@@ -425,11 +434,14 @@ surface ProvisioningRuntime {
 
     @guarantee ProvisionerCleanEnvironment
         -- The provisioner's environment is the host environment plus hotcell
-        -- control variables (HOTCELL_*). It deliberately does NOT receive the
-        -- declared `env.*` variables — those are the agent's environment, and
-        -- a different actor. This keeps the provisioner's bootstrap PATH and
-        -- tooling intact while the agent gets a clean, declared-only
-        -- environment.
+        -- control variables (HOTCELL_*), with one deliberate override: HOME is
+        -- set to a cell-local path (the agent's declared env.HOME, defaulting
+        -- to /home/agent) so tools that cache into $HOME do not create a ghost
+        -- of the host user's home inside the cell rootfs. The original host
+        -- HOME is exposed via HOTCELL_HOST_HOME so a script can still locate
+        -- host config through its provision.host_path binds. This keeps the
+        -- provisioner's bootstrap tooling intact while the agent gets a clean,
+        -- declared-only environment.
 }
 
 -- The sandbox runtime reports program exit. This is not a developer action;

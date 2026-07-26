@@ -94,7 +94,9 @@ pub fn select_provisioner(spec: &ProvisionerSpec) -> anyhow::Result<Box<dyn Prov
 ///
 /// Builds the provisioner from the declaration, prepares the rootfs, runs it,
 /// and reports the outcome. The caller is responsible for persisting the
-/// outcome via the [`state`](crate::state) module.
+/// outcome via the [`state`](crate::state) module. After the provisioner
+/// runs, the host-path staging directory is removed from the rootfs so no
+/// host-path stubs leak into the agent's view.
 pub fn provision(cell: &Cell, declaration: &CellDeclaration) -> anyhow::Result<ProvisionOutcome> {
     let provisioner = select_provisioner(&declaration.provisioner)?;
 
@@ -109,7 +111,7 @@ pub fn provision(cell: &Cell, declaration: &CellDeclaration) -> anyhow::Result<P
     .to_string();
 
     let ctx = ProvisionContext {
-        cell_root,
+        cell_root: cell_root.clone(),
         cellfile_directory: cell.cellfile_directory.clone(),
         workdir,
         environment: declaration
@@ -120,7 +122,13 @@ pub fn provision(cell: &Cell, declaration: &CellDeclaration) -> anyhow::Result<P
         host_paths: declaration.provisioner.host_paths.clone(),
     };
 
-    Ok(provisioner.provision(&ctx, declaration))
+    let outcome = provisioner.provision(&ctx, declaration);
+    // Remove the host-path staging skeleton from the rootfs regardless of
+    // outcome — bwrap leaves intermediate bind-target dirs behind, and we
+    // don't want them (or the host username they'd embed) visible to the
+    // agent.
+    isolation::clean_staging(&cell_root);
+    Ok(outcome)
 }
 
 /// The no-op provisioner (`kind = "none"`). It creates an empty working
@@ -152,40 +160,53 @@ impl Provisioner for NoneProvisioner {
 ///
 /// Inside the sandbox, the script receives these control variables:
 /// - `HOTCELL_CELL_ROOT`: `/` (the rootfs is mounted as the sandbox root).
-/// - `HOTCELL_CELLFILE_DIR`: the Cellfile's directory (read-only bind).
+/// - `HOTCELL_CELLFILE_DIR`: `/hotcell/cellfile` (the staged Cellfile dir).
+/// - `HOTCELL_HOST_ROOT`: `/hotcell/host` (root of the staged host-path tree).
+/// - `HOTCELL_HOST_HOME`: `/hotcell/host/<host HOME>` (staged host home, for
+///   copying config from `~/.pi` etc.).
 /// - `HOTCELL_WORKDIR`: the in-sandbox working directory path (e.g. `/work`).
 /// - `HOTCELL_WORKDIR_HOST`: same as `HOTCELL_WORKDIR` (the host backing *is*
 ///   the in-sandbox path once the rootfs is `/`).
 ///
 /// The script inherits the host environment (so standard tooling works
-/// during bootstrap). It does *not* receive the declared `env.*` variables
-/// — those are the agent's environment. Its stdout/stderr stream to the
-/// developer's console (`ProvisioningLogsToConsole`).
+/// during bootstrap) EXCEPT for `HOME`, which is overridden to a cell-local
+/// path (the agent's declared `env.HOME`, defaulting to `/home/agent`) so
+/// tools that cache into `$HOME` (npm, nvm, etc.) write inside the cell rootfs
+/// rather than leaking a ghost of the host user's home. The script does *not*
+/// receive the declared `env.*` variables — those are the agent's environment.
+/// Its stdout/stderr stream to the developer's console (`ProvisioningLogsToConsole`).
 pub struct ScriptProvisioner {
     script: PathBuf,
 }
 
 impl Provisioner for ScriptProvisioner {
     fn provision(&self, ctx: &ProvisionContext, declaration: &CellDeclaration) -> ProvisionOutcome {
-        let script = if self.script.is_absolute() {
-            self.script.clone()
-        } else {
-            ctx.cellfile_directory.join(&self.script)
-        };
+        // The script path must be relative to the Cellfile directory; the
+        // provisioning sandbox stages the Cellfile dir under /hotcell/cellfile
+        // and execs the script there, so an absolute host path would not
+        // resolve inside the sandbox.
+        if self.script.is_absolute() {
+            return ProvisionOutcome::Failed(format!(
+                "provision.script must be relative to the Cellfile directory, got absolute path `{}`",
+                self.script.display()
+            ));
+        }
+        let script_rel = self.script.to_string_lossy().into_owned();
+        let script_host = ctx.cellfile_directory.join(&self.script);
 
-        let meta = match std::fs::metadata(&script) {
+        let meta = match std::fs::metadata(&script_host) {
             Ok(m) => m,
             Err(e) => {
                 return ProvisionOutcome::Failed(format!(
                     "provision script not found at {}: {e}",
-                    script.display()
+                    script_host.display()
                 ));
             }
         };
         if meta.permissions().mode() & 0o111 == 0 {
             return ProvisionOutcome::Failed(format!(
                 "provision script {} is not executable — try `chmod +x`",
-                script.display()
+                script_host.display()
             ));
         }
 
@@ -194,11 +215,27 @@ impl Provisioner for ScriptProvisioner {
         // HOTCELL_WORKDIR. The provisioner inherits the host environment
         // (so bootstrap tooling works) and receives only HOTCELL_* controls —
         // NOT the declared agent env, which is a different actor's environment.
+        //
+        // HOME is overridden to a cell-local path (the agent's declared HOME,
+        // defaulting to /home/agent) so that tools which cache into $HOME
+        // (npm -> ~/.npm, nvm -> ~/.nvm, etc.) write inside the cell rootfs
+        // rather than creating a ghost of the host user's home (e.g.
+        // /home/<hostuser>) that the agent would then see. The original host
+        // HOME is exposed via HOTCELL_HOST_HOME (a staged path) so a script
+        // can still find host config through its provision.host_path binds.
+        // HOTCELL_CELLFILE_DIR and HOTCELL_HOST_ROOT are set by the sandbox
+        // builder (see isolation::build_provisioning_command).
+        let agent_home = ctx
+            .environment
+            .iter()
+            .find(|(k, _)| k == "HOME")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| "/home/agent".to_string());
         let control_env: Vec<(String, String)> = [
             ("HOTCELL_CELL_ROOT".to_string(), "/".to_string()),
-            ("HOTCELL_CELLFILE_DIR".to_string(), ctx.cellfile_directory.to_string_lossy().into_owned()),
             ("HOTCELL_WORKDIR".to_string(), ctx.workdir.clone()),
             ("HOTCELL_WORKDIR_HOST".to_string(), ctx.workdir.clone()),
+            ("HOME".to_string(), agent_home),
         ]
         .into_iter()
         .collect();
@@ -208,7 +245,7 @@ impl Provisioner for ScriptProvisioner {
             &ctx.cellfile_directory,
             &ctx.host_paths,
             &control_env,
-            &script,
+            &script_rel,
         );
 
         let status = match cmd.status() {
@@ -216,7 +253,7 @@ impl Provisioner for ScriptProvisioner {
             Err(e) => {
                 return ProvisionOutcome::Failed(format!(
                     "failed to run provision script {}: {e}",
-                    script.display()
+                    script_host.display()
                 ));
             }
         };
@@ -224,7 +261,7 @@ impl Provisioner for ScriptProvisioner {
         if !status.success() {
             return ProvisionOutcome::Failed(format!(
                 "provision script {} exited with code {}",
-                script.display(),
+                script_host.display(),
                 status.code().unwrap_or(-1)
             ));
         }

@@ -9,8 +9,8 @@
 //! |-----------------------|----------------------|---------------|
 //! | Cell rootfs (`/`)     | read-write           | read-write    |
 //! | Base system dirs      | read-only            | read-only     |
-//! | Declared host paths   | read-only binds      | **none**      |
-//! | Cellfile directory    | read-only bind       | **none**      |
+//! | Declared host paths   | read-only, staged    | **none**      |
+//! | Cellfile directory    | read-only, staged    | **none**      |
 //! | Network               | shared (egress)      | offline/firewall |
 //! | Environment           | host env + controls  | clean (declared only) |
 //!
@@ -19,6 +19,19 @@
 //! Mirrors the `ProvisionerRunsInCell`, `BootstrapRiskProfile`,
 //! `ProvisionerCannotWriteHost`, `ProvisionerCleanEnvironment`,
 //! `FilesystemIsolation`, and `ProvisionedEnvironment` guarantees.
+//!
+//! ## Host-path staging
+//!
+//! Host paths (the Cellfile directory and `provision.host_path` entries) are
+//! bind-mounted under a neutral staging prefix ([`HOST_STAGING_DIR`], `/hotcell`)
+//! rather than at their original absolute host paths. This is critical: bwrap
+//! creates intermediate directories in the rootfs for bind targets whose paths
+//! do not already exist, and those stubs persist after the sandbox exits. If
+//! host paths were bound at their original locations (e.g. `/home/user/.pi`),
+//! the rootfs would inherit a `/home/user/...` skeleton that leaks the host
+//! username and directory structure to the agent. Staging under `/hotcell`
+//! confines all such stubs to a single directory that the caller removes from
+//! the rootfs after provisioning completes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,6 +46,12 @@ const BASE_RO_BINDS: &[(&str, &str)] = &[
     ("/bin", "/bin"),
     ("/etc", "/etc"),
 ];
+
+/// Neutral staging prefix inside the provisioning sandbox. The Cellfile
+/// directory is mounted at `{prefix}/cellfile` and each declared host path at
+/// `{prefix}/host/<original>`. The caller removes `{cell_root}/{prefix}` from
+/// the rootfs after provisioning so no host-path stubs leak to the agent.
+pub const HOST_STAGING_DIR: &str = "/hotcell";
 
 /// Expand a leading `~` to the caller's `HOME`. bwrap requires absolute paths.
 pub fn expand_home(path: &str) -> PathBuf {
@@ -51,15 +70,26 @@ pub fn expand_home(path: &str) -> PathBuf {
 
 /// Build the **provisioning** profile command: the provisioner runs inside
 /// the cell rootfs (`cell_fs` as `/`), with read-only access to the Cellfile
-/// directory and the declared host bootstrap paths, shared network, and the
-/// host environment plus the given control/env vars. `script` is the program
-/// to execute (resolved by the caller to an absolute path).
+/// directory and the declared host bootstrap paths — all staged under
+/// [`HOST_STAGING_DIR`] so no host-path stubs are left in the rootfs. Network
+/// is shared; the environment is the host's plus the given control/env vars.
+///
+/// `script_rel` is the provision script path relative to the Cellfile
+/// directory (e.g. `./provision.sh`); it is executed as
+/// `{HOST_STAGING_DIR}/cellfile/<script_rel>` inside the sandbox.
+///
+/// The sandbox sets these staging variables (in addition to `control_env`):
+/// - `HOTCELL_CELLFILE_DIR`: `{prefix}/cellfile` — the in-sandbox Cellfile dir.
+/// - `HOTCELL_HOST_ROOT`: `{prefix}/host` — root of the staged host-path tree.
+/// - `HOTCELL_HOST_HOME`: `{prefix}/host/<host HOME>` — the staged host home,
+///   for scripts that copy config from `~/.pi` etc. (only meaningful when the
+///   host HOME is a declared or implied bootstrap path).
 pub fn build_provisioning_command(
     cell_fs: &Path,
     cellfile_directory: &Path,
     host_paths: &[String],
     control_env: &[(String, String)],
-    script: &Path,
+    script_rel: &str,
 ) -> Command {
     let cell_fs_str = cell_fs
         .to_str()
@@ -68,6 +98,14 @@ pub fn build_provisioning_command(
         .to_str()
         .expect("cellfile directory must be valid UTF-8");
 
+    let staging = HOST_STAGING_DIR;
+    let cellfile_mount = format!("{staging}/cellfile");
+    let host_root = format!("{staging}/host");
+    let script_in_sandbox = {
+        let rel = script_rel.trim_start_matches("./");
+        format!("{cellfile_mount}/{rel}")
+    };
+
     let mut cmd = Command::new("bwrap");
     // Cell rootfs as the sandbox root, read-write.
     cmd.args(["--bind", cell_fs_str, "/"]);
@@ -75,37 +113,60 @@ pub fn build_provisioning_command(
     for (src, dst) in BASE_RO_BINDS {
         cmd.args(["--ro-bind", src, dst]);
     }
-    // Fresh /tmp, /proc, /dev — created before the cellfile/host binds below
-    // so that a cellfile directory living under /tmp is not masked by the
-    // tmpfs (bwrap applies operations left-to-right).
+    // Fresh /tmp, /proc, /dev — before the staged binds below so that a
+    // Cellfile/host path under /tmp is not masked (bwrap applies ops in order).
     cmd.args(["--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev"]);
-    // The Cellfile directory, read-only at the same path, so the provision
-    // script and any project-relative seeds resolve inside the sandbox.
-    cmd.args(["--ro-bind", cellfile_dir_str, cellfile_dir_str]);
-    // Declared host bootstrap paths, read-only at the same path. These are the
-    // provisioner's privilege; the agent never sees them.
+
+    // Stage the Cellfile directory read-only under the staging prefix so the
+    // provision script and project-relative seeds resolve without leaving a
+    // host-path skeleton in the rootfs.
+    cmd.args(["--ro-bind", cellfile_dir_str, &cellfile_mount]);
+
+    // Stage each declared host bootstrap path read-only under
+    // {staging}/host/<original absolute path>. These are the provisioner's
+    // privilege; the agent never sees them.
     for hp in host_paths {
         let resolved = expand_home(hp);
         if let Some(s) = resolved.to_str() {
-            cmd.args(["--ro-bind", s, s]);
+            let target = format!("{host_root}{s}");
+            cmd.args(["--ro-bind", s, &target]);
         }
     }
+
     cmd.args([
         "--unshare-pid",
         "--share-net",
         "--die-with-parent",
-        "--chdir", cellfile_dir_str,
+        "--chdir", &cellfile_mount,
     ]);
 
-    // The provisioner inherits the host environment (so standard tooling —
-    // node, npm, curl, git — works during bootstrap). HOTCELL_* control vars
-    // and declared agent env are layered on top via --setenv.
+    // Staging variables (encapsulate the staging scheme here).
+    let host_home = std::env::var("HOME").unwrap_or_default();
+    let host_home_staged = format!("{host_root}{host_home}");
+    cmd.args(["--setenv", "HOTCELL_CELLFILE_DIR", &cellfile_mount]);
+    cmd.args(["--setenv", "HOTCELL_HOST_ROOT", &host_root]);
+    cmd.args(["--setenv", "HOTCELL_HOST_HOME", &host_home_staged]);
+
+    // Caller-supplied control/env vars (HOTCELL_*, HOME override, etc.).
     for (k, v) in control_env {
         cmd.args(["--setenv", k, v]);
     }
 
-    cmd.arg(script);
+    cmd.arg(&script_in_sandbox);
     cmd
+}
+
+/// Remove the host-path staging directory from the cell rootfs after
+/// provisioning, so no host-path stubs leak into the agent's view. Safe to
+/// call when the staging dir does not exist (e.g. the no-op provisioner).
+pub fn clean_staging(cell_fs: &Path) {
+    let staging = cell_fs.join(HOST_STAGING_DIR.trim_start_matches('/'));
+    if staging.exists() {
+        // Best-effort: a failure here leaves harmless empty stubs under
+        // /hotcell, which the agent can see but which reveal no host state
+        // beyond the staging prefix itself.
+        let _ = std::fs::remove_dir_all(&staging);
+    }
 }
 
 /// Build the **agent** profile command: the agent runs inside the cell rootfs

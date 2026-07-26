@@ -122,7 +122,7 @@ fn provision_override_preserves_host_paths() {
         format!(
             "#!/usr/bin/env bash\nset -euo pipefail\n\
              mkdir -p \"$HOTCELL_CELL_ROOT/opt/bin\" \"$HOTCELL_WORKDIR_HOST\"\n\
-             cp \"{host}/marker.txt\" \"$HOTCELL_CELL_ROOT/opt/bin/marker.txt\"\n\
+             cp \"${{HOTCELL_HOST_ROOT}}{host}/marker.txt\" \"$HOTCELL_CELL_ROOT/opt/bin/marker.txt\"\n\
              printf '#!/usr/bin/env bash\\ncat /opt/bin/marker.txt\\n' \\\n\
                > \"$HOTCELL_CELL_ROOT/opt/bin/show\"\n\
              chmod +x \"$HOTCELL_CELL_ROOT/opt/bin/show\"\n",

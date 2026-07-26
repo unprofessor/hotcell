@@ -46,7 +46,7 @@ fn provisioner_can_read_declared_host_path() {
         format!(
             "#!/usr/bin/env bash\nset -euo pipefail\n\
              mkdir -p \"$HOTCELL_CELL_ROOT/opt/bin\" \"$HOTCELL_WORKDIR_HOST\"\n\
-             cp \"{host}/marker.txt\" \"$HOTCELL_CELL_ROOT/opt/bin/marker.txt\"\n\
+             cp \"${{HOTCELL_HOST_ROOT}}{host}/marker.txt\" \"$HOTCELL_CELL_ROOT/opt/bin/marker.txt\"\n\
              printf '#!/usr/bin/env bash\\ncat /opt/bin/marker.txt\\n' \\\n\
                > \"$HOTCELL_CELL_ROOT/opt/bin/show-marker\"\n\
              chmod +x \"$HOTCELL_CELL_ROOT/opt/bin/show-marker\"\n",
@@ -164,6 +164,81 @@ fn agent_has_clean_environment() {
     assert!(
         output.status.success(),
         "agent env was not clean: exit {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+}
+
+/// Regression: provisioning must not leave a skeleton of the host user's home
+/// directory in the cell rootfs. Two mechanisms caused this historically:
+/// (1) the provisioner inheriting HOME=/home/<user>, so tools like npm cached
+/// into $HOME inside the rootfs; (2) bwrap creating intermediate directories
+/// in the rootfs for host-path binds whose targets lived under /home/<user>.
+/// Both are fixed: HOME is overridden to a cell-local path, and host paths are
+/// staged under /hotcell and cleaned up after provisioning. This test declares
+/// host paths under the temp dir (which stands in for the host home) and
+/// asserts the agent sees neither the host home path nor the staging prefix.
+#[test]
+fn host_home_does_not_leak_into_cell() {
+    let dir = TempDir::new().expect("create temp dir");
+
+    // A fake "host home" with a config dir, standing in for ~/.pi etc.
+    let host_home = TempDir::new().expect("create host home");
+    fs::write(host_home.path().join(".gitconfig"), "[user]\n").unwrap();
+    fs::create_dir(host_home.path().join(".pi")).unwrap();
+
+    fs::write(
+        dir.path().join("Cellfile"),
+        format!(
+            "provisioner = script\n\
+             provision.script = ./provision.sh\n\
+             provision.host_path = {home}/.pi\n\
+             provision.host_path = {home}/.gitconfig\n\
+             workdir = /work\n",
+            home = host_home.path().display()
+        ),
+    )
+    .expect("write Cellfile");
+
+    // The provision script touches the staged host paths (proving they were
+    // visible to the provisioner) and creates the workdir.
+    fs::write(
+        dir.path().join("provision.sh"),
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\n\
+             test -f \"${{HOTCELL_HOST_ROOT}}{home}/.gitconfig\"\n\
+             test -d \"${{HOTCELL_HOST_ROOT}}{home}/.pi\"\n\
+             mkdir -p \"$HOTCELL_WORKDIR_HOST\"\n",
+            home = host_home.path().display()
+        ),
+    )
+    .expect("write provision.sh");
+    fs::set_permissions(
+        dir.path().join("provision.sh"),
+        PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+
+    // The agent must NOT see the host home path nor the staging prefix. Both
+    // `test -e` checks must fail (exit 1); we invert with `!` so success means
+    // "neither path exists".
+    let home_in_cell = host_home.path().display().to_string();
+    let check = format!(
+        "test ! -e {home} && test ! -e /hotcell",
+        home = home_in_cell
+    );
+
+    let output = Command::new(hotcell_bin())
+        .current_dir(dir.path())
+        .args(["run", "--", "/bin/sh", "-c", &check])
+        .output()
+        .expect("run hotcell");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "host home or staging prefix leaked into the cell: exit {:?}\n\
+         stdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
 }
