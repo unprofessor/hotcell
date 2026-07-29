@@ -76,3 +76,58 @@ Ran in the worktree `/home/exfed/projects/wt-wire-firewall-into-cli`:
   none of the proxy vars set (exit 1, empty stdout). `--unshare-net` is still
   added unconditionally by `build_agent_command`, so the empty-policy path
   remains fully offline.
+
+## Review
+verdict: approved
+reviewer: reviewer-1
+date: 2026-07-29
+
+Re-checked everything independently in the worktree; did not rely on the
+worker's self-validation.
+
+Code review (`git diff main..plan/wire-firewall-into-cli`, `src/cli.rs`,
+`src/firewall.rs`, `src/isolation.rs`):
+- The hard refusal block (`if !allowed_endpoints.is_empty() { ... exit(1) }`)
+  is removed. Confirmed.
+- Firewall is started only when `provisioned.network.allowed_endpoints` is
+  non-empty, guarded by `if !provisioned.network.allowed_endpoints.is_empty()`.
+  Empty policy falls into the `else => None` branch: no `firewall::start`, no
+  proxy env. Confirmed.
+- `crate::firewall::start(&provisioned.network)` matches the actual API in
+  `src/firewall.rs`: `pub fn start(policy: &NetworkPolicy) ->
+  anyhow::Result<FirewallHandle>`. `handle.listen_addr()` matches
+  `pub fn listen_addr(&self) -> &str`. Confirmed.
+- `HTTP_PROXY` and `HTTPS_PROXY` are both set to `http://<listen_addr>`;
+  `NO_PROXY` = `127.0.0.1,localhost`. Pushed onto `env` only inside the
+  non-empty branch. Confirmed.
+- `FirewallHandle` is held as `let _firewall: Option<...>` across
+  `cmd.spawn()` / `child.wait()`, then explicitly `drop(_firewall)` after the
+  child exits (necessary because the fn returns via `std::process::exit`,
+  which skips Drop). Confirmed.
+- `src/isolation.rs` `build_agent_command` still always passes `--unshare-net`
+  (line 207), so the empty-policy path stays fully offline and (per the scope
+  note) the agent cannot yet reach the host-loopback proxy — out of scope for
+  this task. Confirmed.
+
+Commands run in the worktree:
+- `cargo build` — clean, no warnings/errors.
+- `cargo test` — all green. Per-suite: lib 13 passed; run_cell_override 3;
+  run_file_override 4; run_global_flags 4; run_minimal 2; run_risk_profiles 4;
+  run_script_provisioner 4. Total 34 passed, 0 failed.
+- `cargo clippy --no-deps` — clean, no warnings.
+- `cargo fmt --check` — clean (exit 0).
+
+Manual smoke tests (reproduced myself with the built binary):
+- Non-empty policy: Cellfile `net.allow = api.openai.com:443`, `hotcell run
+  /usr/bin/printenv HTTP_PROXY HTTPS_PROXY NO_PROXY`. stderr printed
+  `network firewall: HTTP allowlist proxy on 127.0.0.1:35759 (1 endpoint(s))`;
+  stdout printed `http://127.0.0.1:35759` (HTTP_PROXY),
+  `http://127.0.0.1:35759` (HTTPS_PROXY), `127.0.0.1,localhost` (NO_PROXY);
+  exit 0. Acceptance 1 & 2 met.
+- Empty policy: empty Cellfile, same command. No `network firewall:` line;
+  printenv printed nothing; exit 1 (expected — env vars unset). Acceptance 3
+  met (refusal gone, stays offline, no proxy).
+
+All four acceptance criteria satisfied. Out-of-scope item (actual traffic
+routing to the proxy via relaxed net namespace) is correctly deferred to the
+`loopback-only-net` task and was not judged here.
