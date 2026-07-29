@@ -11,9 +11,10 @@ Three rules deliver it:
 
 1. **One file per ticket.** All mutable state for a ticket lives in that
    ticket's file.
-2. **Downward is stored in the child.** A task names its parent story in
-   frontmatter; a story names its parent epic. The parent never records child
-   state. So updating a child never touches its parent.
+2. **Downward is stored in the child.** A task names its parent story and its
+   `depends_on` siblings in frontmatter; a story names its parent epic. The
+   parent never records child state. So updating a child never touches its
+   parent or siblings.
 3. **Roll-up is derived, never stored.** A story's progress is computed by
    scanning its child task files on trunk; an epic's by scanning its stories.
    Nobody edits a parent to reflect child progress.
@@ -24,98 +25,153 @@ task branches is conflict-free in `.plan/`. (Code conflicts between two tasks
 editing the same source file can still happen — and should: that signals real
 overlap between tasks, not a bookkeeping failure to paper over.)
 
-## Trunk is the board
+## Roles
+
+- **Tech lead** (foreground, with the developer) — sole writer to the backlog:
+  creates tickets, sets `depends_on`, dispatches workers and reviewers, merges
+  approved branches. Does not implement or review.
+- **Worker** — implements one task in a worktree; self-validates; sets
+  `review`. Does not set `done`.
+- **Reviewer** — fresh-context, independent; re-runs acceptance checks; edits
+  only the task file's `## Review` section with a `verdict`. Does not edit
+  code.
+
+## Trunk is the board (plus open branches)
 
 Trunk (default `main`; `PLAN_TRUNK` to override) is the single source of truth
 for what tickets exist and their merged statuses. A worktree branch only sees
 tickets that existed when it was cut, so workers must read the board from
 trunk, not their checkout. `scripts/board.sh` does this read-only via
-`git show trunk:.plan/...` — no checkout, no merge, always current.
+`git show trunk:.plan/...` for the backlog **and** scans `plan/*` branches for
+in-flight status — so a task a worker has flipped to `review` on its branch
+shows up as "ready for review" immediately, without waiting for merge.
 
-## The tech lead is the single writer to the backlog
+## Definition of done (no honor system)
 
-The tech lead is a **foreground** agent run in a turn-taking session with the
-developer. It is the only agent that:
+`review` → `done` requires an **independent reviewer**, not the worker's say-so:
 
-- creates epic, story, and task files (so ID/slug allocation is sequential —
-  no creation race is possible),
-- edits epic and story files (their definitions; rare),
-- merges returned task branches into trunk,
-- regenerates board snapshots.
+1. **Worker completes** implementation and self-validates every `## Acceptance`
+   criterion, recording what was checked in a `## Validation` section (commands
+   + results). Sets `status: review`. Commits on the task branch.
+2. **Reviewer (fresh context)** reads the task, the diff, and `## Validation`,
+   then **runs the acceptance checks itself** in the worktree. It edits only
+   the task file:
+   - `verdict: approved` → leaves `status: review`, adds `## Review`, commits.
+   - `verdict: changes-requested` → adds `## Review`, flips `status: in_progress`,
+     commits. The tech lead re-dispatches the worker.
+3. **Tech lead merges** with `merge-task.sh`, which requires both
+   `status: review` **and** an approved `## Review` verdict, then flips the
+   task to `done` on trunk as part of the merge.
 
-It does **not** implement tasks. Workers implement; the tech lead plans and
-integrates.
+A worker setting `status: review` without a `## Validation` section, or a
+merge without an approved verdict, is refused by the scripts. This is the
+guardrail against the most common agent failure mode: declaring done on the
+honor system.
 
-Because only one planning session is live at a time and it commits all new
-tickets to trunk *before* any worktree branches off, workers always branch
-from a backlog that already contains their task.
+## Dependencies between siblings
+
+A task (or story) declares the siblings it needs done first via frontmatter:
+```yaml
+depends_on: [http-connect-proxy, wire-firewall-into-cli]
+```
+These are slugs of siblings under the same parent. Enforcement:
+
+- **`claim.sh`** refuses to create a worktree for a task whose `depends_on`
+  are not all `status: done` on trunk, printing the blockers. So a worker is
+  never dispatched onto a task whose prerequisites are unfinished.
+- **`board.sh`** shows a `BLOCKED-BY` column for tasks: any dep not `done` on
+  trunk is listed, so the tech lead can see at a glance what's ready versus
+  what's waiting.
+- `blocked` (the status) is still available for *ad-hoc* blockers a dependency
+  can't express (an external decision, a bug in a dep outside this plan). Put
+  the reason in `## Notes`. Prefer `depends_on` for sibling ordering.
+
+Dependencies are set/edited by the tech lead on trunk (a backlog edit), never
+by workers on a task branch.
 
 ## Workflow
 
 ### Planning (tech lead + developer, on trunk)
 
 1. Read the board: `./scripts/board.sh`.
-2. Create tickets with `scripts/new-ticket.sh` (allocates the sort-hint prefix
-   and writes frontmatter from a template), then fill the body and commit.
-3. Decide which tasks to dispatch now; create worktrees with
-   `scripts/claim.sh` and hand each to a worker.
+2. Create tickets with `scripts/new-ticket.sh`, fill bodies, set `depends_on`
+   in frontmatter for sibling ordering, commit.
+3. Dispatch ready tasks (deps `done`) via `scripts/claim.sh`; hand each
+   worktree to a worker.
 
 ### Execution (worker, in a worktree)
 
-1. Work in the assigned worktree. `claim.sh` already set the task to
-   `in_progress` and committed that flip on the task branch.
-2. Read the task file and its parent story for context.
-3. Edit **only** your task file (`.plan/tasks/<slug>.md`) and code. Update the
-   task's `## Notes` as a log. Never edit any other `.plan/` file.
-4. On completion set `status: review` (awaiting tech-lead merge) or `done`,
-   commit, and hand the branch back.
+1. Work in the assigned worktree; `claim.sh` set `status: in_progress`.
+2. Read the task + parent story; note `depends_on` (already verified `done`).
+3. Edit only your task file + code.
+4. Implement; log to `## Notes`.
+5. Self-validate every `## Acceptance` item; record `## Validation`; set
+   `status: review`; commit; hand back.
+
+### Review (reviewer, fresh context, in the worktree)
+
+1. `scripts/review.sh <slug>` prints branch, worktree, acceptance, and diff.
+2. Run the acceptance checks yourself.
+3. Edit only the task file's `## Review`: `verdict: approved` (leave
+   `status: review`) or `verdict: changes-requested` (flip `status: in_progress`).
+4. Commit; hand back.
 
 ### Integration (tech lead, on trunk)
 
-1. `scripts/merge-task.sh <slug>` merges the task branch into trunk and
-   removes the worktree. Conflict-free in `.plan/` by construction.
-2. Re-branch the next round of workers from the updated trunk so they see the
-   newly-merged state and any tickets the tech lead added.
-3. Optionally regenerate/commit a `board.md` snapshot — a *view*, never the
-   source of truth.
+1. `scripts/merge-task.sh <slug>`:
+   - requires `status: review` + `verdict: approved` (refuses otherwise with
+     guidance);
+   - `git merge --no-ff`; on conflict, aborts, lists conflicted files, and
+     prints rebase guidance for the worker (worktree + branch preserved);
+   - on success, flips the task to `done` on trunk, removes the worktree,
+     deletes the branch.
+2. Re-branch the next round of workers from fresh trunk.
 
 ## Concurrency notes
 
-- **Claiming a task** = branching a worktree. No locks, no marker races: two
-  agents cannot both write the same task file because they're in separate
-  checkouts on separate branches. `status: in_progress` is a *record* of
-  intent, not a coordination primitive.
+- **Claiming a task** = branching a worktree. No locks: two agents cannot both
+  write the same task file because they're in separate checkouts on separate
+  branches. `status: in_progress` is a record, not a coordination primitive.
 - **Ticket creation** is racy only if workers create tickets. They don't —
-  only the tech lead does, in a single sequential session. This is why
-  creation is a trunk-side, singly-threaded process.
-- **Reading the board** is always safe: `git show` against trunk is read-only
-  and never blocks writers.
+  only the tech lead does, in a single sequential session.
+- **Review is independent** by construction: the reviewer runs fresh-context
+  and reads the worktree, so it is not influenced by the worker's session.
+- **Reading the board** is always safe: `git show` / `git branch` are
+  read-only and never block writers.
 
 ## Edge cases
 
 - **A worker discovers missing work.** It does *not* create a ticket. It
-  records the gap in its task's `## Notes` for the tech lead to triage in the
-  next planning session.
+  records the gap in its task's `## Notes` for the tech lead to triage.
 - **A task needs to split.** The worker finishes or pauses, hands back the
-  branch; the tech lead creates the new sub-tasks on trunk and re-dispatches.
+  branch; the tech lead creates the new sub-tasks on trunk (with
+  `depends_on` as needed) and re-dispatches.
 - **Two tasks touch the same code.** Let them conflict at merge time — that's
-  a real signal the tasks overlap. Resolve by sequencing (merge one, rebase
-  the other) or by re-splitting the work in planning.
-- **Renaming a story/epic.** Because the parent link is in frontmatter (not
-  the filename or a path), renaming a story's file only requires updating the
-  `parent:` field in its child tasks — a small, well-contained edit the tech
-  lead does on trunk. Children's filenames are independent of the parent's.
+  a real signal the tasks overlap. `merge-task.sh` aborts and tells the worker
+  to rebase onto fresh trunk; resolve by sequencing (merge one, rebase the
+  other) or by re-splitting the work in planning.
+- **Review requests changes.** The branch stays alive with `status: in_progress`
+  and a `changes-requested` verdict; the tech lead re-dispatches the worker to
+  the same worktree. The worker addresses the notes, re-validates, and sets
+  `review` again (the reviewer's earlier `## Review` stays in the file as a
+  record; the new review appends a second `## Review` block or amends —
+  convention: append a dated block so the history is visible).
+- **Renaming a story/epic.** The parent link is in frontmatter (not the
+  filename), so renaming a story's file only requires updating `parent:` in its
+  child tasks and any `depends_on` that reference it — a small, well-contained
+  edit the tech lead does on trunk.
 - **No trunk yet / fresh repo.** `scripts/new-ticket.sh` writes to the working
-  tree; commit the `.plan/` files to trunk before any `claim.sh` so workers
-  branch from a backlog that exists.
+  tree; commit `.plan/` to trunk before any `claim.sh` so workers branch from a
+  backlog that exists.
 
 ## What this scheme deliberately does not have
 
 - **No central `index.md` / `board.md` as source of truth.** A board file is a
-  derived view; if you commit one, treat it as a snapshot, regenerable from
-  the ticket files.
+  derived view; if you commit one, treat it as a regenerable snapshot.
 - **No lock files or claim markers.** The branch is the claim.
 - **No hierarchical filenames** (`E01/S02/T03`). Flat slugs per kind keep
   renames cheap and `git log` readable; the parent link lives in frontmatter.
-- **No worker-created tickets.** Creation is the tech lead's job, which is
-  what makes allocation race-free.
+- **No worker-created tickets.** Creation is the tech lead's job, which makes
+  allocation race-free.
+- **No self-merge.** `done` requires an independent reviewer's approved
+  verdict; the scripts enforce it.
