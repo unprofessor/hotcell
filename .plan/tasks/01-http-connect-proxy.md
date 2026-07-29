@@ -3,7 +3,7 @@ id: http-connect-proxy
 kind: task
 parent: network-firewall
 title: Implement HTTP CONNECT allowlist proxy with hyper
-status: todo
+status: in_progress
 assignee: null
 created: 2026-07-29
 updated: 2026-07-29
