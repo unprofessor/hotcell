@@ -2,32 +2,447 @@
 //!
 //! Mirrors the `NetworkFirewall` guarantee: the agent can only reach
 //! endpoints in the cell's provisioned network policy. All other network
-//! connections are blocked. Enforcement is via an HTTP proxy; non-HTTP
-//! traffic is blocked by default. A cell with no allowed endpoints has no
-//! network access.
+//! connections are blocked. Enforcement is via a local HTTP proxy that only
+//! handles `CONNECT` requests (tunneling); non-`CONNECT` requests are
+//! refused. A cell with no allowed endpoints has no network access — the
+//! proxy rejects every request.
 //!
-//! TODO(v1): implement a local HTTP proxy (hyper) that checks each request's
-//! destination host/port against `NetworkPolicy::allowed_endpoints` and
-//! refuses everything else. The agent is launched with `HTTP_PROXY` /
-//! `HTTPS_PROXY` pointing at this proxy and non-HTTP egress is blocked by
-//! the sandbox's network namespace.
+//! `firewall::start(policy)` binds a local TCP socket, spawns an async hyper
+//! server (on its own tokio runtime) that checks each `CONNECT` request's
+//! destination host/port against `NetworkPolicy::allowed_endpoints`, tunnels
+//! allowed destinations, and refuses everything else with `403 Forbidden`.
+//! The agent is expected to be launched with `HTTP_PROXY` / `HTTPS_PROXY`
+//! pointing at the returned address; non-HTTP egress is blocked by the
+//! sandbox's network namespace (a separate concern).
+//!
+//! The [`FirewallHandle`] owns the proxy's runtime, so the server lives as
+//! long as the handle is held and is torn down when it is dropped.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use hyper::body::{Bytes, Incoming};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use tokio::io::{copy_bidirectional, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::runtime::Runtime;
 
 use crate::cellfile::NetworkPolicy;
 
+/// An empty response body (no frames, exact zero length).
+type EmptyBody = http_body_util::Empty<Bytes>;
+
 /// A handle to the running firewall proxy for a session.
+///
+/// Holds the proxy's tokio runtime so the server stays alive for as long as
+/// the handle is held. Dropping the handle shuts the proxy down.
+/// `listen_addr` is the real address the server bound to (e.g.
+/// `127.0.0.1:54321`), suitable for use as the agent's `HTTP_PROXY`.
 pub struct FirewallHandle {
-    // TODO: hold the proxy's listen address / task handle.
     pub listen_addr: String,
+    runtime: Option<Runtime>,
+}
+
+impl FirewallHandle {
+    /// The real address the proxy is listening on (e.g. `127.0.0.1:54321`),
+    /// not the placeholder `127.0.0.1:0`.
+    pub fn listen_addr(&self) -> &str {
+        &self.listen_addr
+    }
+}
+
+impl Drop for FirewallHandle {
+    fn drop(&mut self) {
+        if let Some(rt) = self.runtime.take() {
+            // Graceful but bounded shutdown so dropping a handle never hangs
+            // on a long-lived accept loop.
+            rt.shutdown_timeout(Duration::from_millis(200));
+        }
+    }
 }
 
 /// Start the HTTP allowlist proxy for the given network policy.
 ///
-/// Returns the address the agent should use as its `HTTP_PROXY`. A policy
-/// with no allowed endpoints yields a proxy that rejects every request.
-pub fn start(_policy: &NetworkPolicy) -> anyhow::Result<FirewallHandle> {
-    // TODO(v1): bind a local TCP socket, spawn the proxy server, and return
-    // its address. For now this is a stub.
+/// Binds a local TCP socket (OS-assigned port on `127.0.0.1`), spawns the
+/// async hyper server on a dedicated tokio runtime, and returns a handle
+/// carrying the real listen address. The caller does not need to be running
+/// a tokio runtime — `start` creates its own and keeps it alive via the
+/// returned handle.
+///
+/// A policy with no allowed endpoints yields a proxy that rejects every
+/// request with `403 Forbidden`.
+pub fn start(policy: &NetworkPolicy) -> anyhow::Result<FirewallHandle> {
+    // Build the proxy's own runtime. The rest of hotcell is sync (see
+    // `cli.rs`), so the proxy owns its runtime and keeps it alive via the
+    // returned handle.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()?;
+
+    // Bind on the runtime so the I/O driver owns the listener. `block_on`
+    // here is safe: `start` is only called from sync contexts.
+    let listener = runtime.block_on(async { TcpListener::bind("127.0.0.1:0").await })?;
+    let listen_addr = listener.local_addr()?;
+
+    let policy = Arc::new(policy.clone());
+    runtime.spawn(serve(listener, policy));
+
     Ok(FirewallHandle {
-        listen_addr: "127.0.0.1:0".to_string(),
+        listen_addr: listen_addr.to_string(),
+        runtime: Some(runtime),
     })
+}
+
+/// Accept loop: serve each inbound connection on its own task.
+async fn serve(listener: TcpListener, policy: Arc<NetworkPolicy>) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, _peer)) => {
+                let policy = policy.clone();
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let svc = service_fn(move |req: Request<Incoming>| {
+                        let policy = policy.clone();
+                        async move { handle_connect(req, policy).await }
+                    });
+                    if let Err(err) = http1::Builder::new()
+                        .keep_alive(true)
+                        .preserve_header_case(true)
+                        .serve_connection(io, svc)
+                        .with_upgrades()
+                        .await
+                    {
+                        tracing::debug!("firewall: connection closed: {err}");
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::warn!("firewall: accept error: {err}");
+            }
+        }
+    }
+}
+
+/// Handle a single proxy request. Only `CONNECT` is supported; every other
+/// method is refused with `405 Method Not Allowed`.
+async fn handle_connect(
+    req: Request<Incoming>,
+    policy: Arc<NetworkPolicy>,
+) -> Result<Response<EmptyBody>, std::convert::Infallible> {
+    if req.method() != Method::CONNECT {
+        return Ok(empty_response(StatusCode::METHOD_NOT_ALLOWED));
+    }
+
+    // For a CONNECT request the request-target is authority-form
+    // (`host:port`); `Uri` exposes it via `host()` / `port_u16()`.
+    let host = req.uri().host().map(|h| h.to_string());
+    let port = req.uri().port_u16();
+
+    let allowed = match host.as_deref() {
+        Some(h) => endpoint_allowed(&policy, h, port),
+        None => false,
+    };
+
+    if !allowed {
+        return Ok(empty_response(StatusCode::FORBIDDEN));
+    }
+
+    // Allowed: acknowledge the tunnel and spawn the bidirectional copy once
+    // the connection is upgraded. CONNECT defaults to port 443 when none is
+    // given (matches `http`'s default for the scheme implied by CONNECT).
+    let host = host.unwrap();
+    let port = port.unwrap_or(443);
+
+    tokio::spawn(async move {
+        let upgraded = match hyper::upgrade::on(req).await {
+            Ok(up) => up,
+            Err(err) => {
+                tracing::warn!("firewall: upgrade failed for {host}:{port}: {err}");
+                return;
+            }
+        };
+        let mut client = TokioIo::new(upgraded);
+
+        let mut server = match TcpStream::connect((host.as_str(), port)).await {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!("firewall: connect to {host}:{port} failed: {err}");
+                // Best-effort: signal failure to the client by closing.
+                let _ = client.shutdown().await;
+                return;
+            }
+        };
+
+        // Tunnel bytes both ways until either side closes.
+        if let Err(err) = copy_bidirectional(&mut client, &mut server).await {
+            tracing::debug!("firewall: tunnel to {host}:{port} ended: {err}");
+        }
+    });
+
+    Ok(empty_response(StatusCode::OK))
+}
+
+/// Build a response with an empty body and the given status.
+fn empty_response(status: StatusCode) -> Response<EmptyBody> {
+    Response::builder()
+        .status(status)
+        .body(EmptyBody::new())
+        .expect("static response")
+}
+
+/// Check whether a destination `(host, port)` is permitted by the policy.
+///
+/// Hosts match case-insensitively. If an endpoint declares a port, the
+/// target port must match exactly; if the endpoint has no port, any port is
+/// allowed for that host.
+fn endpoint_allowed(policy: &NetworkPolicy, host: &str, port: Option<u16>) -> bool {
+    policy.allowed_endpoints.iter().any(|ep| {
+        ep.host.eq_ignore_ascii_case(host)
+            && match ep.port {
+                None => true,
+                Some(p) => port == Some(p),
+            }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cellfile::Endpoint;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+    use std::time::Duration;
+
+    /// Read an HTTP response head (up to the blank line) from a blocking
+    /// stream, byte by byte. Times out after 2s so a broken proxy fails the
+    /// test instead of hanging.
+    fn read_response_head(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = stream.read(&mut byte).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.push(byte[0]);
+            if buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    /// Send a raw `CONNECT` request and return the response status line +
+    /// headers.
+    fn send_connect(proxy_addr: &str, target: &str) -> String {
+        let mut stream = TcpStream::connect(proxy_addr).unwrap();
+        let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+        read_response_head(&mut stream)
+    }
+
+    /// Run a trivial echo TCP server on an OS-assigned port; returns its
+    /// address. The server accepts one connection, echoes bytes back, and
+    /// exits. Useful for verifying the tunnel actually forwards data.
+    fn spawn_echo_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                conn.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let mut buf = [0u8; 128];
+                loop {
+                    match conn.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if conn.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    fn policy(endpoints: &[(&str, Option<u16>)]) -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_endpoints: endpoints
+                .iter()
+                .map(|(h, p)| Endpoint {
+                    host: (*h).to_string(),
+                    port: *p,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn listen_addr_is_real_bound_address() {
+        let handle = start(&policy(&[])).unwrap();
+        let addr = handle.listen_addr();
+        assert_ne!(addr, "127.0.0.1:0", "handle must expose the real address");
+        assert!(
+            addr.starts_with("127.0.0.1:") && !addr.ends_with(":0"),
+            "real listen address, got {addr}"
+        );
+        // The port must be bindable / reachable.
+        assert!(
+            TcpStream::connect(addr).is_ok(),
+            "proxy is listening on {addr}"
+        );
+    }
+
+    #[test]
+    fn allows_listed_host_port_and_tunnels() {
+        let target = spawn_echo_server();
+        // target is "127.0.0.1:<port>"; allow that exact host:port.
+        let (th, tp) = target.rsplit_once(':').unwrap();
+        let port: u16 = tp.parse().unwrap();
+        let handle = start(&policy(&[(th, Some(port))])).unwrap();
+
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+        client.write_all(req.as_bytes()).unwrap();
+        let head = read_response_head(&mut client);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "allowed CONNECT should be tunneled (200), got: {head}"
+        );
+
+        // After 200, the connection is a raw tunnel to the echo server.
+        client.set_write_timeout(Some(Duration::from_secs(2))).ok();
+        client.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let payload = b"hotcell-tunnel-check";
+        client.write_all(payload).unwrap();
+        let mut got = [0u8; 128];
+        let n = client.read(&mut got).unwrap();
+        assert_eq!(
+            &got[..n],
+            payload,
+            "tunnel must forward bytes to the target"
+        );
+    }
+
+    #[test]
+    fn allows_listed_host_with_any_port() {
+        let target = spawn_echo_server();
+        let (th, _tp) = target.rsplit_once(':').unwrap();
+        // Allow the host with no port constraint: any port is permitted.
+        let handle = start(&policy(&[(th, None)])).unwrap();
+
+        let head = send_connect(handle.listen_addr(), &target);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "host-only endpoint should allow any port, got: {head}"
+        );
+    }
+
+    #[test]
+    fn host_match_is_case_insensitive() {
+        let target = spawn_echo_server();
+        let (th, tp) = target.rsplit_once(':').unwrap();
+        let port: u16 = tp.parse().unwrap();
+        // Policy stores the host in uppercase; CONNECT uses lowercase.
+        let handle = start(&policy(&[(th.to_uppercase().as_str(), Some(port))])).unwrap();
+
+        let head = send_connect(handle.listen_addr(), &target);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "host matching should be case-insensitive, got: {head}"
+        );
+    }
+
+    #[test]
+    fn denies_when_port_mismatches() {
+        let target = spawn_echo_server();
+        let (th, _tp) = target.rsplit_once(':').unwrap();
+        // Allow the host only on a port we will not connect to.
+        let handle = start(&policy(&[(th, Some(999))])).unwrap();
+
+        let head = send_connect(handle.listen_addr(), &target);
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "wrong port should be refused (403), got: {head}"
+        );
+    }
+
+    #[test]
+    fn denies_unlisted_host() {
+        let _target = spawn_echo_server();
+        // Allow something unrelated; the echo server's host:port is not listed.
+        let handle = start(&policy(&[("allowed.example.com", Some(443))])).unwrap();
+
+        let head = send_connect(handle.listen_addr(), "127.0.0.1:1");
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "unlisted destination should be refused (403), got: {head}"
+        );
+    }
+
+    #[test]
+    fn empty_policy_rejects_everything() {
+        let handle = start(&policy(&[])).unwrap();
+
+        let head = send_connect(handle.listen_addr(), "127.0.0.1:443");
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "empty policy must reject CONNECT (403), got: {head}"
+        );
+
+        let head2 = send_connect(handle.listen_addr(), "api.openai.com:443");
+        assert!(
+            head2.starts_with("HTTP/1.1 403"),
+            "empty policy must reject every CONNECT (403), got: {head2}"
+        );
+    }
+
+    #[test]
+    fn non_connect_method_is_refused() {
+        let handle = start(&policy(&[("api.openai.com", None)])).unwrap();
+
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        let req = "GET http://api.openai.com/ HTTP/1.1\r\nHost: api.openai.com\r\n\r\n";
+        client.write_all(req.as_bytes()).unwrap();
+        let head = read_response_head(&mut client);
+        assert!(
+            head.starts_with("HTTP/1.1 405"),
+            "non-CONNECT should be refused with 405, got: {head}"
+        );
+    }
+
+    #[test]
+    fn endpoint_allowed_unit() {
+        let p = policy(&[("api.openai.com", Some(443)), ("api.anthropic.com", None)]);
+        assert!(endpoint_allowed(&p, "api.openai.com", Some(443)));
+        assert!(
+            endpoint_allowed(&p, "API.OpenAI.COM", Some(443)),
+            "case-insensitive"
+        );
+        assert!(
+            !endpoint_allowed(&p, "api.openai.com", Some(8443)),
+            "port mismatch"
+        );
+        assert!(
+            endpoint_allowed(&p, "api.anthropic.com", Some(8443)),
+            "no port = any port"
+        );
+        assert!(
+            !endpoint_allowed(&p, "evil.example.com", Some(443)),
+            "unlisted host"
+        );
+        assert!(
+            !endpoint_allowed(&p, "api.openai.com", None),
+            "missing port on port-scoped endpoint"
+        );
+    }
 }
