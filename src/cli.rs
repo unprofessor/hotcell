@@ -160,7 +160,7 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     // Launch the agent inside the isolated sandbox, relaying stdio.
     // Mirrors RelayOnly / CleanEnvironment / ProvisionedEnvironment.
     let provisioned = cell.provisioned_as.as_ref().expect("just provisioned");
-    let env: Vec<(String, String)> = provisioned
+    let mut env: Vec<(String, String)> = provisioned
         .environment
         .iter()
         .map(|v| (v.key.clone(), v.value.clone()))
@@ -180,17 +180,33 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     let workdir_host = crate::provisioning::workdir_host_path(&cell_fs, &workdir);
     std::fs::create_dir_all(&workdir_host)?;
 
-    // Network firewall (HTTP allowlist proxy) is not yet implemented. Until it
-    // is, refuse to run cells that declare a non-empty network policy rather
-    // than silently granting full egress — the agent profile is offline.
-    if !provisioned.network.allowed_endpoints.is_empty() {
-        state::mark_failed(&cellfile.directory, name)?;
-        eprintln!(
-            "network policy with allowed endpoints is not yet supported (firewall unimplemented); cell declared {} endpoint(s)",
-            provisioned.network.allowed_endpoints.len()
-        );
-        std::process::exit(1);
-    }
+    // Network firewall (HTTP allowlist proxy): when the provisioned policy
+    // declares allowed endpoints, start the local proxy and point the agent
+    // at it via HTTP_PROXY/HTTPS_PROXY. Loopback stays direct via NO_PROXY so
+    // the agent can still talk to itself. The firewall handle owns the proxy's
+    // tokio runtime; hold it for the lifetime of the agent process so the
+    // server stays up, and drop it once the child exits. A policy with no
+    // allowed endpoints starts no firewall: the agent stays fully offline via
+    // `--unshare-net` (added by `build_agent_command`).
+    let _firewall: Option<crate::firewall::FirewallHandle> =
+        if !provisioned.network.allowed_endpoints.is_empty() {
+            let handle = crate::firewall::start(&provisioned.network)?;
+            let proxy_url = format!("http://{}", handle.listen_addr());
+            eprintln!(
+                "network firewall: HTTP allowlist proxy on {} ({} endpoint(s))",
+                handle.listen_addr(),
+                provisioned.network.allowed_endpoints.len()
+            );
+            env.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
+            env.push(("HTTPS_PROXY".to_string(), proxy_url));
+            // Keep loopback direct: the proxy only forwards CONNECT for
+            // listed endpoints, and local services should not be forced
+            // through it.
+            env.push(("NO_PROXY".to_string(), "127.0.0.1,localhost".to_string()));
+            Some(handle)
+        } else {
+            None
+        };
 
     let log_file = state::log_file_path(&cellfile.directory, name);
 
@@ -203,6 +219,11 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
 
     let mut child = cmd.spawn()?;
     let exit_status = child.wait()?;
+
+    // The agent has exited; tear down the firewall proxy (if any) before we
+    // return. Explicit drop because the function exits via `process::exit`,
+    // which would otherwise skip the handle's `Drop`.
+    drop(_firewall);
 
     if !exit_status.success() {
         eprintln!(
