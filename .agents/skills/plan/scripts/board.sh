@@ -91,7 +91,7 @@ for entry in "epics:$plan/epics" "stories:$plan/stories" "tasks:$plan/tasks"; do
 done
 
 # In flight: scan plan/* branches for the task's status on that branch.
-inflight=$(git branch --list 'plan/*' 2>/dev/null | sed 's/^[* ]*//' || true)
+inflight=$(git branch --list 'plan/*' 2>/dev/null | sed 's/^[*+ ]*//' || true)
 if [[ -n "$inflight" ]]; then
   echo "## in flight (worktree branches)"
   printf '%-30s %-14s %s\n' BRANCH STATUS TASK
