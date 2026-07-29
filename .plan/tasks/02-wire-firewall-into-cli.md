@@ -3,7 +3,7 @@ id: wire-firewall-into-cli
 kind: task
 parent: network-firewall
 title: Wire firewall into the cli run path
-status: todo
+status: in_progress
 assignee: null
 created: 2026-07-29
 updated: 2026-07-29
