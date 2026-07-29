@@ -16,10 +16,10 @@ plan="${PLAN_DIR:-.plan}"
 branch="plan/$slug"
 
 path=$(git ls-tree -r --name-only "$trunk" -- "$plan/tasks" 2>/dev/null \
-       | grep -E "/${slug}\.md$" | head -n1 || true)
+       | grep -E -- "/[0-9]+-${slug}\.md$" | head -n1 || true)
 [[ -z "$path" ]] && { echo "no task file for slug '$slug' on $trunk" >&2; exit 1; }
 
-git worktree add -b "$branch" "$wt" "$trunk"
+git worktree add -b "$branch" "$wt" "$trunk" >/dev/null
 
 date="$(date +%F)"
 (

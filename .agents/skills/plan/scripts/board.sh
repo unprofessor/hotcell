@@ -26,10 +26,14 @@ git rev-parse --verify -q "$trunk" >/dev/null || {
 }
 
 for kind in epic story task; do
-  dir="$plan/${kind}s"
+  case "$kind" in
+    epic)  dir="$plan/epics" ;;
+    story) dir="$plan/stories" ;;
+    task)  dir="$plan/tasks" ;;
+  esac
   paths=$(git ls-tree -r --name-only "$trunk" -- "$dir" 2>/dev/null | grep -E '\.md$' || true)
   [[ -z "$paths" ]] && continue
-  echo "## ${kind}s"
+  echo "## $(basename "$dir")"
   printf '%-30s %-12s %-22s %s\n' ID STATUS PARENT TITLE
   while IFS= read -r p; do
     blob=$(git show "$trunk:$p")
