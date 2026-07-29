@@ -3,7 +3,7 @@ id: loopback-only-net
 kind: task
 parent: network-firewall
 title: Relax agent isolation to loopback-only plus proxy
-status: todo
+status: in_progress
 assignee: null
 created: 2026-07-29
 updated: 2026-07-29
