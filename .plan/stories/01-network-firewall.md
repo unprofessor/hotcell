@@ -3,7 +3,7 @@ id: network-firewall
 kind: story
 parent: v1-self-hostable-hotcell
 title: Network firewall
-status: todo
+status: done
 assignee: null
 created: 2026-07-29
 updated: 2026-07-29
@@ -32,9 +32,10 @@ Today:
 
 ## Notes
 
-- 2026-07-29 created. Tasks:
-  - `http-connect-proxy` — the proxy server.
-  - `wire-firewall-into-cli` — start it on `run`, set proxy env for the agent.
-  - `loopback-only-net` — allow loopback egress so the agent can reach the
-    proxy while staying blocked from everything else.
-  - `firewall-tests` — tests + a real `examples/pi-bootstrap` run.
+- 2026-07-30 all four tasks done and merged:
+  - `http-connect-proxy` — hyper CONNECT allowlist proxy.
+  - `wire-firewall-into-cli` — starts firewall, sets proxy env for agent.
+  - `loopback-only-net` — UDS bridge through `--unshare-net`; kernel-enforced non-loopback block.
+  - `firewall-tests` — integration tests + pi-bootstrap e2e (path proven with a fake key → real Google 400; real-key 200 deferred to developer).
+- Open item for developer: verify `examples/pi-bootstrap` with a real API key for a 200 model response.
+- Open item for tech lead: `provision.sh` seeds `~/.pi` from the host, which overrides the Cellfile's `env.PI_PROVIDER` — consider whether that should remain the default.
