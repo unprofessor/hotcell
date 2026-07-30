@@ -94,11 +94,7 @@ pub fn run() -> Result<()> {
         } => run_cell(&ctx, &name, &program, &args),
         Command::Destroy { name } => destroy_cell(&ctx, &name),
         Command::Status => status(&ctx),
-        Command::Fwd {
-            uds,
-            program,
-            args,
-        } => run_fwd(&uds, &program, &args),
+        Command::Fwd { uds, program, args } => run_fwd(&uds, &program, &args),
     }
 }
 
@@ -230,11 +226,8 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     // or host process can squat it, and is bind-mounted read-only into the
     // sandbox so the agent cannot tamper with the socket. It is removed after
     // the agent exits.
-    let bridge_dir_host: Option<(
-        AgentBridge,
-        PathBuf,
-        crate::firewall::FirewallHandle,
-    )> = if !provisioned.network.allowed_endpoints.is_empty() {
+    let bridge_dir_host: Option<(AgentBridge, PathBuf, crate::firewall::FirewallHandle)> =
+        if !provisioned.network.allowed_endpoints.is_empty() {
             let handle = crate::firewall::start(&provisioned.network)?;
             eprintln!(
                 "network firewall: HTTP allowlist proxy on {} ({} endpoint(s))",

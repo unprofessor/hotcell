@@ -269,8 +269,7 @@ pub fn build_agent_command(
         // supervisor. `current_exe` is the running hotcell; the cell rootfs
         // does not contain it, so we stage it out-of-band (read-only) where
         // the agent cannot modify it.
-        let exe = std::env::current_exe()
-            .expect("determine hotcell executable path for forwarder");
+        let exe = std::env::current_exe().expect("determine hotcell executable path for forwarder");
         let exe_str = exe
             .to_str()
             .expect("hotcell executable path must be valid UTF-8");

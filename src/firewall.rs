@@ -239,10 +239,7 @@ async fn handle_connect(
 /// Both streams are tokio-native, so they implement `AsyncRead`/`AsyncWrite`
 /// directly — no `TokioIo` wrapping (that adapter is only for bridging
 /// hyper's IO traits to tokio's, e.g. for an `Upgraded` body).
-async fn relay_uds_to_tcp(
-    mut uds: UnixStream,
-    tcp_addr: &str,
-) -> std::io::Result<()> {
+async fn relay_uds_to_tcp(mut uds: UnixStream, tcp_addr: &str) -> std::io::Result<()> {
     let mut tcp = TcpStream::connect(tcp_addr).await?;
     copy_bidirectional(&mut uds, &mut tcp).await?;
     Ok(())

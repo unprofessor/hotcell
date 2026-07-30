@@ -95,9 +95,7 @@ fn spawn_echo_server() -> String {
                 match conn.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if conn.write_all(b"echo:").is_err()
-                            || conn.write_all(&buf[..n]).is_err()
-                        {
+                        if conn.write_all(b"echo:").is_err() || conn.write_all(&buf[..n]).is_err() {
                             break;
                         }
                     }
@@ -210,7 +208,10 @@ sys.exit(0 if ok else 1)
          stdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
-    assert!(stdout.contains("RESULT ok"), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("RESULT ok"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }
 
 /// (c) A networked cell's agent CANNOT reach a non-loopback endpoint directly.
@@ -261,5 +262,8 @@ sys.exit(0 if ok else 1)
          stdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
-    assert!(stdout.contains("RESULT ok"), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("RESULT ok"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
 }

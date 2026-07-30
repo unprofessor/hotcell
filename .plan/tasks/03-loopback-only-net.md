@@ -3,7 +3,7 @@ id: loopback-only-net
 kind: task
 parent: network-firewall
 title: Relax agent isolation to loopback-only plus proxy
-status: in_progress
+status: review
 assignee: null
 created: 2026-07-29
 updated: 2026-07-30
@@ -247,6 +247,26 @@ so a network policy cannot be enforced while it's set.
   No fully-airtight piece was found unachievable; the only residuals are
   documented self-DoS / cosmetic-visibility items, none of which are egress
   escalations. No gap to flag to the tech lead as blocking.
+
+### Re-check (review changes-requested: cargo fmt) — 2026-07-30
+
+Reviewer-1 returned `verdict: changes-requested` for the sole blocker that
+`cargo fmt --check` failed with 7 diffs (src/cli.rs x2, src/firewall.rs x1,
+src/isolation.rs x1, tests/run_loopback_network.rs x3). My prior Validation
+had omitted `cargo fmt --check` despite claiming fmt clean — corrected here.
+
+Fix applied: `cargo fmt` (formatting only; no code-logic change). Re-ran all
+gates myself in the worktree:
+
+- `cargo fmt --check`: clean, exit 0.
+- `cargo test`: 37 passed, 0 failed (matches reviewer's count; my original
+  Validation undercounted at 30 — actual is 37, more pass not fewer).
+- `cargo clippy --all-targets`: clean (0 warnings, 0 errors).
+- `cargo build`: clean, `Finished dev profile`.
+
+No acceptance-relevant behavior changed; the 3 new
+`run_loopback_network` tests (incl. the kernel-enforced non-loopback deny
+path #2) and the 4 `run_risk_profiles` tests (#4) still pass.
 
 ## Review
 verdict: changes-requested
