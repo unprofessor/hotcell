@@ -36,17 +36,38 @@ env.PATH = /opt/pi/bin:/opt/node/bin:/usr/bin:/bin
 env.HOME = /home/agent
 
 # Pick a provider and supply its API key. Pi defaults to google (Gemini).
+# The API key MUST be set here (env.*) — the agent runs with a clean
+# environment (only env.* declared in the Cellfile are passed through), so a
+# key exported in your shell does NOT reach the agent. Set ONE provider:
 env.PI_PROVIDER = google
-# env.GOOGLE_API_KEY = ...
+# env.GOOGLE_API_KEY = ...        # Gemini
 # env.PI_PROVIDER = anthropic
-# env.ANTHROPIC_API_KEY = ...
+# env.ANTHROPIC_API_KEY = ...     # Claude
 # env.PI_PROVIDER = openai
-# env.OPENAI_API_KEY = ...
+# env.OPENAI_API_KEY = ...        # GPT
 
-# Allow egress to the model provider(s) you use.
-# NOTE: network firewall enforcement is not yet implemented; hotcell will
-# refuse to run a cell with a non-empty network policy until it is. Comment
-# these out to run offline, or watch for firewall support.
-# net.allow = generativelanguage.googleapis.com:443
-# net.allow = api.anthropic.com:443
-# net.allow = api.openai.com:443
+# Allow egress to the model provider(s) you use. The network firewall IS
+# implemented: the cell's agent runs in an unshared-net namespace (loopback
+# only) with an HTTP CONNECT allowlist proxy as its only egress path. List
+# only the provider host(s) you actually use; everything else is blocked.
+# Uncomment the line(s) matching your chosen provider above.
+net.allow = generativelanguage.googleapis.com:443   # Gemini (google)
+# net.allow = api.anthropic.com:443                  # Claude (anthropic)
+# net.allow = api.openai.com:443                     # GPT (openai)
+
+# IMPORTANT — provider config precedence (verified end-to-end):
+# provision.sh seeds ~/.pi from the host (see provision.sh). If your host
+# ~/.pi sets a provider/model (e.g. an internal proxy), that seeded config
+# OVERRIDES env.PI_PROVIDER / PI_MODEL here, and pi will target the seeded
+# provider's endpoint — which is likely NOT in `net.allow` above, so the
+# agent gets "Connection error." To force the provider declared here either:
+#   (a) remove the ~/.pi seeding block in provision.sh for a hermetic cell,
+#       OR
+#   (b) pass the provider/model/key explicitly on `hotcell run -- pi`, e.g.:
+#         hotcell run -- pi -p "..." --provider google --model gemini-2.5-flash \
+#           --api-key "$GOOGLE_API_KEY"
+# Verified (without a real key): pi -> HTTPS_PROXY -> firewall proxy ->
+# CONNECT 200 -> TLS -> generativelanguage.googleapis.com returned Google's
+# real "API key not valid" (400 API_KEY_INVALID) response, proving the
+# firewall egress path works end-to-end. A real key is all that's needed for
+# a 200 model response.
