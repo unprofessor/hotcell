@@ -191,7 +191,21 @@ while not hdr.endswith(b"\r\n\r\n"):
     hdr += b
 status = hdr.splitlines()[0].decode() if hdr else "(empty)"
 s.sendall(b"hotcell-bridge")
-got = s.recv(128)
+# The echo server writes "echo:" and the payload in two separate write_all
+# calls, and the relay forwards each write in its own iteration, so they can
+# arrive as separate TCP segments. A single recv() may return only b"echo:"
+# with the payload arriving afterward. Accumulate bytes until we have the
+# full expected response, or the read times out / EOFs.
+s.settimeout(5)
+got = b""
+while b"hotcell-bridge" not in got:
+    try:
+        chunk = s.recv(128)
+    except socket.timeout:
+        break
+    if not chunk:
+        break
+    got += chunk
 s.close()
 ok = status.startswith("HTTP/1.1 200") and got == b"echo:hotcell-bridge"
 print("status:", status)
