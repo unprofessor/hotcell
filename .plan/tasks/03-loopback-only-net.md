@@ -3,7 +3,7 @@ id: loopback-only-net
 kind: task
 parent: network-firewall
 title: Relax agent isolation to loopback-only plus proxy
-status: review
+status: in_progress
 assignee: null
 created: 2026-07-29
 updated: 2026-07-30
@@ -247,3 +247,101 @@ so a network policy cannot be enforced while it's set.
   No fully-airtight piece was found unachievable; the only residuals are
   documented self-DoS / cosmetic-visibility items, none of which are egress
   escalations. No gap to flag to the tech lead as blocking.
+
+## Review
+verdict: changes-requested
+reviewer: reviewer-1
+date: 2026-07-30
+
+Re-reviewed in fresh context in the worktree. I re-ran every check myself
+and independently verified the deny path (#2) — see below. The security /
+correctness substance is sound and all four acceptance criteria are met with
+kernel-level (not cooperative) enforcement. The ONLY blocker is a formatting
+gate failure: `cargo fmt --check` reports 7 violations the worker's
+`## Validation` did not catch (it claimed clippy clean but omitted fmt). The
+fix is a single `cargo fmt` — no judgment or design change required.
+
+### Checks I ran myself (in the worktree)
+
+- `cargo build`: clean, `Finished dev profile`.
+- `cargo test`: 37 passed, 0 failed (worker claimed 30; actual count is
+  37 — more pass, not fewer). Includes the 3 new `run_loopback_network`
+  tests and the 4 unchanged `run_risk_profiles` tests.
+- `cargo clippy --all-targets`: clean (0 warnings, 0 errors). Confirmed.
+- `cargo fmt --check`: **FAILS** — 7 diffs across `src/cli.rs` (2),
+  `src/firewall.rs` (1), `src/isolation.rs` (1),
+  `tests/run_loopback_network.rs` (3). This is the sole blocker.
+
+### Deny-path verification (#2) — the load-bearing criterion
+
+This is the part I was told not to take on trust. I read
+`tests/run_loopback_network.rs::networked_agent_cannot_reach_non_loopback`
+and ran it specifically (`cargo test --test run_loopback_network`): PASS.
+
+The test is NOT cooperative-only. With a non-empty policy
+(`net.allow = api.openai.com:443`, so the forwarder + bridge are actually
+up — exercising the full networked path), the in-sandbox python3 agent
+performs a **direct** `socket.create_connection(("1.1.1.1", 80), timeout=3)`
+and asserts the result is `OSError` with `errno == 101` (`ENETUNREACH`),
+printing `FAIL: non-loopback connected` and failing the test if the connect
+succeeded. It also checks `example.com:80` is unreachable. The assertion is
+on the kernel's `ENETUNREACH`, not on `HTTP_PROXY` being set. So #2 is
+enforced by the kernel (`--unshare-net` => namespace has only a private
+loopback, no route/interface, no `CAP_NET_ADMIN`), not by hoping the agent
+uses the proxy. This is the airtight guarantee the task requires.
+
+I also confirmed in `src/isolation.rs` that `--unshare-net` is emitted at
+line 261 *unconditionally* — before and independent of the
+`if let Some(bridge)` block — so both the offline (`bridge = None`) and
+networked (`bridge = Some`) paths keep it. Verified by grepping the source,
+not just reading the worker's notes.
+
+### Other invariants I verified against the diff
+
+- Bridge dir RO-bound: `isolation.rs` emits `--ro-bind <host_bridge_dir>
+  /hotcell-bridge`. Confirmed.
+- Supervisor binary RO-bound: `--ro-bind <current_exe> /hotcell-fwd`.
+  Confirmed.
+- Forwarder is the sole listener on the namespace loopback: `run_fwd`
+  (cli.rs) binds `127.0.0.1:0`; the agent's `HTTP_PROXY` points at that
+  port, set by the forwarder after it discovers the bound port. Confirmed.
+- Firewall (not forwarder) does allowlist enforcement: `run_fwd` /
+  `relay_tcp_to_uds` and the host-side `relay_uds_to_tcp` are dumb byte
+  pipes (`copy`/`copy_bidirectional`); the `CONNECT` allowlist decision
+  stays in `firewall::handle_connect`. Confirmed.
+- Agent env points `HTTP_PROXY` at the in-namespace forwarder, not the host
+  proxy: `run_fwd` sets `HTTP_PROXY`/`HTTPS_PROXY` to
+  `http://127.0.0.1:<forwarder-port>` on the agent child; `run_cell` no
+  longer sets proxy env itself (it sets none — the forwarder does).
+  Confirmed.
+- Offline path (#3): empty policy => `bridge_dir_host = None` => no
+  firewall started, no `start_uds_bridge`, no forwarder launched
+  (`build_agent_command` takes the `else` branch and execs the agent
+  directly), no `HTTP_PROXY`/`HTTPS_PROXY` set, and `--unshare-net` kept.
+  `offline_cell_has_no_network` asserts `HTTP_PROXY`/`HTTPS_PROXY` unset
+  AND non-loopback connect => errno 101. PASS.
+- Risk-profile tests (#4): `cargo test --test run_risk_profiles` — 4/4
+  pass, unchanged. PASS.
+- Manual end-to-end / experiments the worker logged: not re-run by me; the
+  automated tests already cover the same airtight properties and they pass.
+
+### What failed and what to fix (changes-requested)
+
+`cargo fmt --check` fails. Fix: run `cargo fmt` (no other change). The
+specific diffs it wants, for transparency:
+- `src/cli.rs:94` — `Command::Fwd { uds, program, args }` arm on one line.
+- `src/cli.rs:230` — `let bridge_dir_host: Option<(AgentBridge, PathBuf,
+  crate::firewall::FirewallHandle)> =` then the `if` on the next line.
+- `src/firewall.rs:239` — `async fn relay_uds_to_tcp(mut uds: UnixStream,
+  tcp_addr: &str) -> std::io::Result<()>` on one line.
+- `src/isolation.rs:269` — `let exe = std::env::current_exe().expect(...)`
+  on one line.
+- `tests/run_loopback_network.rs:95` — the `if conn.write_all(b"echo:")...
+  || ...` on one line.
+- `tests/run_loopback_network.rs:210` and `:261` — multi-line `assert!`
+  reformatted.
+
+After `cargo fmt`, re-run `cargo fmt --check` (must be clean), `cargo test`
+(must stay 37/0), `cargo clippy --all-targets` (must stay clean), then set
+`status: review` again and hand back. No code-logic change is needed — the
+isolation design and enforcement are correct and complete.
