@@ -146,3 +146,85 @@ all test servers are in-process threads that exit with the test process.
   the default: it leaks the host's provider config into the cell and
   overrides the Cellfile's `env.PI_PROVIDER`. Two workarounds are documented
   in the example Cellfile.
+
+## Review
+verdict: approved
+reviewer: reviewer-1
+date: 2026-07-30
+
+Independent re-verification in fresh context. I ran every check myself; I did
+not trust the worker's self-validation.
+
+### Diff read
+- `tests/run_firewall_integration.rs` (new, 237 lines): a single cell run with
+  two host-loopback echo servers on distinct OS-assigned ports; only one port
+  is in `net.allow`. The in-cell python agent reads `HTTP_PROXY` and issues
+  raw `CONNECT` to both through the bridge. It asserts BOTH paths:
+    * allowlisted -> `HTTP/1.1 200` AND echo round-trip `got == b"echo:hotcell-e2e"`
+      (accumulated across segmented writes, same pattern as the loopback fix).
+    * non-allowlisted (same host, different port) -> `HTTP/1.1 403` from the
+      proxy itself, distinct from the kernel non-loopback block.
+  Coverage matches acceptance #1: allow (200 + echo) and deny (403) through
+  the full bridge (agent -> `hotcell fwd` -> UDS -> host firewall proxy).
+- `tests/run_loopback_network.rs` fix: replaced the single `s.recv(128)` in
+  `networked_agent_reaches_loopback_proxy` with a read loop guarded by
+  `settimeout(5)` that accumulates until `b"hotcell-bridge"` is present or
+  EOF/timeout. Correct fix for the segmented-write regression; not a hack.
+- `examples/pi-bootstrap/Cellfile`: stale "firewall not yet implemented"
+  comment removed; Gemini `net.allow` uncommented as default; documented the
+  `~/.pi`-seeding provider-precedence gotcha + two workarounds. Reasonable.
+
+### Commands I ran (worktree, release profile)
+- `cargo fmt --check` -> exit 0 (clean).
+- `cargo clippy --all-targets` -> exit 0, no warnings.
+- `cargo test --release` (full suite) -> exit 0. Per-binary:
+    unittests 13, run_cell_override 3, run_file_override 4,
+    run_firewall_integration 1, run_global_flags 4, run_loopback_network 3,
+    run_minimal 2, run_risk_profiles 4, run_script_provisioner 4.
+    Total 38 passed, 0 failed. Matches the worker's claim.
+- `cargo test --release --test run_firewall_integration` x3 consecutive:
+    `1 passed; 0 failed` every run. Not flaky.
+- `cargo test --release --test run_loopback_network` x3 consecutive:
+    `3 passed; 0 failed` every run (incl. the fixed test). Not flaky;
+    confirms the read-loop fix is stable.
+
+### Acceptance #1 — integration test (allow + deny)
+MET. The test exercises the full bridge and asserts both the allow path
+(200 + byte-for-byte echo round-trip) and the deny path (proxy-issued 403).
+Verified green 3x.
+
+### Acceptance #2 — pi-bootstrap run against a real provider
+PARTIALLY VERIFIED — path proven, real-key 200 deferred. I agree with the
+worker's honest `[ ]` marking and their reasoning.
+
+What IS proven (and is strong evidence for the criterion's intent — "prove
+the firewall works end-to-end with a real provider"): a real Google HTTP
+response (`400 API_KEY_INVALID`, real `googleapis.com` domain, real TLS
+cert, `TLS_AES_256_GCM_SHA384`) was returned through the complete firewall
+chain: pi -> `HTTPS_PROXY` -> firewall proxy -> `CONNECT 200` (allowlist
+permitted `generativelanguage.googleapis.com:443`) -> TLS handshake ->
+Google's server. A raw in-cell python CONNECT confirmed the same path
+independently. The firewall's job — allowlist decision, CONNECT tunneling,
+TLS passthrough — is fully exercised by that 400 response.
+
+What is NOT proven: a `200` model response, which requires a valid API key
+(auth success), not firewall functionality. The criterion's literal text
+("manually verified with an API key") is not fully satisfied because no
+real key was available. I judge this approvable: the firewall behavior the
+criterion exists to verify is demonstrated, and the remaining gap is purely
+auth, which is the developer's to close with a real key. The worker did NOT
+overclaim — they left #2 `[ ]` and flagged it. Recommend the developer run
+`hotcell run -- pi --provider google --model gemini-2.5-flash --api-key
+"$REAL_KEY"` once to observe a 200 and close #2 fully; nothing in this task
+blocks that.
+
+### Acceptance #3 — `cargo test --release` green
+MET. 38 passed, 0 failed, exit 0. The pre-existing loopback regression is
+fixed (read loop, not single recv) and stable across 3 runs.
+
+### Verdict
+approved. Acceptance #1 and #3 fully met and independently verified.
+Acceptance #2 partially met: the firewall egress path to a real public
+provider is proven end-to-end (real Google 400 through proxy+TLS); only a
+real-key 200 remains, deferred to the developer. The worker was honest
+about the gap. Leaving `status: review` for the tech lead to merge.
