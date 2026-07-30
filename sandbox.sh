@@ -23,4 +23,4 @@ bwrap \
     --unshare-pid \
     --share-net \
     --die-with-parent \
-    -- $@
+    -- "$@"
