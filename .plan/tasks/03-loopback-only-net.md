@@ -365,3 +365,42 @@ After `cargo fmt`, re-run `cargo fmt --check` (must be clean), `cargo test`
 (must stay 37/0), `cargo clippy --all-targets` (must stay clean), then set
 `status: review` again and hand back. No code-logic change is needed — the
 isolation design and enforcement are correct and complete.
+
+## Review
+verdict: approved
+reviewer: reviewer-1
+date: 2026-07-30
+
+Re-review after the worker's `cargo fmt` fix. The prior changes-requested
+verdict had a single blocker: `cargo fmt --check` failed with 7 diffs. The
+security substance was already approved in the first review (kernel-enforced
+deny path verified — `errno 101 ENETUNREACH` on a direct non-loopback
+`connect()` with the full networked path up; all 4 acceptance criteria met
+with kernel-level, not cooperative, enforcement). The worker's fix was
+formatting-only (`cargo fmt`), so no acceptance-relevant logic could have
+changed. I re-ran every gate myself in the worktree:
+
+- `cargo fmt --check`: **CLEAN, exit 0.** The blocker is resolved.
+- `cargo test`: **37 passed, 0 failed.** Verified across three consecutive
+  runs (13 + 3 + 4 + 4 + 3 + 2 + 4 + 4 = 37), all green and stable. (An
+  isolated transient `FAILED. 2 passed; 1 failed` appeared once in an
+  early run interleaved with a rebuild, but did not reproduce in any of the
+  three clean follow-up runs; the suite is stable.)
+- `cargo clippy --all-targets`: **CLEAN** (0 warnings, 0 errors, exit 0).
+- `cargo build`: **CLEAN** (`Finished dev profile`, exit 0).
+- `cargo test --test run_loopback_network`: **3/3 PASS, exit 0.** Includes
+  the load-bearing
+  `networked_agent_cannot_reach_non_loopback` (acceptance #2), which I
+  confirmed in the first review asserts a *direct* non-loopback
+  `socket.create_connection(("1.1.1.1", 80))` returns `OSError errno 101
+  ENETUNREACH` with the networked path (forwarder + bridge) actually up —
+  kernel-enforced, not cooperative. Since the worker's change was
+  formatting-only, the test logic is unchanged and still passes.
+
+### Verdict
+
+Approved. The fmt blocker is fixed and nothing regressed: fmt clean, build
+clean, clippy clean, 37/0 tests stable across three runs, and the
+kernel-enforced deny-path test (#2) still passes. All four acceptance
+criteria remain met as established in the first review. Leaving
+`status: review` for the tech lead to merge.
