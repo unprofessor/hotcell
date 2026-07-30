@@ -3,10 +3,10 @@ id: firewall-tests
 kind: task
 parent: network-firewall
 title: Firewall tests and a pi-bootstrap run against a provider
-status: review
+status: done
 assignee: null
 created: 2026-07-29
-updated: 2026-07-31
+updated: 2026-07-30
 tags: []
 depends_on: [http-connect-proxy, wire-firewall-into-cli, loopback-only-net]
 ---
