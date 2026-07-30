@@ -27,7 +27,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::io::{copy_bidirectional, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::runtime::Runtime;
 
 use crate::cellfile::NetworkPolicy;
@@ -51,6 +51,52 @@ impl FirewallHandle {
     /// not the placeholder `127.0.0.1:0`.
     pub fn listen_addr(&self) -> &str {
         &self.listen_addr
+    }
+
+    /// Start a Unix-domain socket bridge that relays raw bytes between an
+    /// in-namespace forwarder and this firewall's TCP proxy.
+    ///
+    /// The firewall proxy binds the *host's* `127.0.0.1:<port>`, which is
+    /// unreachable from a `bwrap --unshare-net` namespace (the namespace has
+    /// only its own private loopback). To let the agent reach the proxy with
+    /// no network route exposed, a Unix-domain socket is bound at `uds_path`
+    /// on the host (in a directory bind-mounted into both sides) and a tiny
+    /// in-namespace forwarder relays the agent's loopback TCP to this socket.
+    /// The host-side relay here then forwards those bytes to the firewall's
+    /// TCP listener, where the real CONNECT allowlist enforcement happens.
+    ///
+    /// The bridge is a *dumb byte pipe* on both sides; all policy decisions
+    /// remain in [`handle_connect`]. `uds_path` is removed first to clear any
+    /// stale socket from a previous run. The listener lives for as long as the
+    /// handle's runtime (dropped with the handle).
+    pub fn start_uds_bridge(&self, uds_path: &std::path::Path) -> anyhow::Result<()> {
+        // Clear a stale socket file so the bind does not fail with EADDRINUSE.
+        let _ = std::fs::remove_file(uds_path);
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("firewall runtime already shut down"))?;
+        let listener = runtime.block_on(async { UnixListener::bind(uds_path) })?;
+        let tcp_addr = self.listen_addr.clone();
+        runtime.spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let tcp_addr = tcp_addr.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = relay_uds_to_tcp(stream, &tcp_addr).await {
+                                tracing::debug!("firewall: uds bridge relay ended: {err}");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!("firewall: uds bridge accept error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 }
 
@@ -184,6 +230,22 @@ async fn handle_connect(
     });
 
     Ok(empty_response(StatusCode::OK))
+}
+
+/// Relay bytes bidirectionally between an accepted Unix-domain connection
+/// (from the in-namespace forwarder) and the firewall's TCP proxy. The proxy
+/// performs the actual CONNECT allowlist enforcement; this is a byte pipe.
+///
+/// Both streams are tokio-native, so they implement `AsyncRead`/`AsyncWrite`
+/// directly — no `TokioIo` wrapping (that adapter is only for bridging
+/// hyper's IO traits to tokio's, e.g. for an `Upgraded` body).
+async fn relay_uds_to_tcp(
+    mut uds: UnixStream,
+    tcp_addr: &str,
+) -> std::io::Result<()> {
+    let mut tcp = TcpStream::connect(tcp_addr).await?;
+    copy_bidirectional(&mut uds, &mut tcp).await?;
+    Ok(())
 }
 
 /// Build a response with an empty body and the given status.

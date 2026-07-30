@@ -5,14 +5,19 @@
 //! `hotcell run` blocks until the program exits, relaying stdio faithfully
 //! and passing the exit code through.
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::thread;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
 use crate::cell::CellStatus;
 use crate::cellfile::Cellfile;
+use crate::isolation::AgentBridge;
 use crate::provisioning::{provision, provision_digest, ProvisionOutcome};
 use crate::state;
 
@@ -53,6 +58,26 @@ enum Command {
     },
     /// List cells for the Cellfile.
     Status,
+    /// INTERNAL: in-namespace loopback-to-Unix-socket forwarder supervisor.
+    ///
+    /// Not for developers. Launched by `build_agent_command` inside the
+    /// agent's `bwrap --unshare-net` namespace when the cell has a non-empty
+    /// network policy. Binds the namespace's own `127.0.0.1`, relays each
+    /// accepted TCP connection byte-for-byte to the bridge Unix socket
+    /// (`--uds`), sets `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for the agent to
+    /// point at this loopback address, then spawns and waits on the agent
+    /// program. Exits with the agent's exit code.
+    Fwd {
+        /// In-sandbox path of the bridge Unix socket to relay to.
+        #[arg(long)]
+        uds: String,
+        /// The agent program to supervise.
+        program: String,
+        /// Arguments for the agent program. Captured verbatim (trailing) so
+        /// flags after the program are passed through untouched.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 pub fn run() -> Result<()> {
@@ -69,6 +94,11 @@ pub fn run() -> Result<()> {
         } => run_cell(&ctx, &name, &program, &args),
         Command::Destroy { name } => destroy_cell(&ctx, &name),
         Command::Status => status(&ctx),
+        Command::Fwd {
+            uds,
+            program,
+            args,
+        } => run_fwd(&uds, &program, &args),
     }
 }
 
@@ -160,7 +190,7 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     // Launch the agent inside the isolated sandbox, relaying stdio.
     // Mirrors RelayOnly / CleanEnvironment / ProvisionedEnvironment.
     let provisioned = cell.provisioned_as.as_ref().expect("just provisioned");
-    let mut env: Vec<(String, String)> = provisioned
+    let env: Vec<(String, String)> = provisioned
         .environment
         .iter()
         .map(|v| (v.key.clone(), v.value.clone()))
@@ -180,37 +210,77 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     let workdir_host = crate::provisioning::workdir_host_path(&cell_fs, &workdir);
     std::fs::create_dir_all(&workdir_host)?;
 
-    // Network firewall (HTTP allowlist proxy): when the provisioned policy
-    // declares allowed endpoints, start the local proxy and point the agent
-    // at it via HTTP_PROXY/HTTPS_PROXY. Loopback stays direct via NO_PROXY so
-    // the agent can still talk to itself. The firewall handle owns the proxy's
-    // tokio runtime; hold it for the lifetime of the agent process so the
-    // server stays up, and drop it once the child exits. A policy with no
-    // allowed endpoints starts no firewall: the agent stays fully offline via
-    // `--unshare-net` (added by `build_agent_command`).
-    let _firewall: Option<crate::firewall::FirewallHandle> =
-        if !provisioned.network.allowed_endpoints.is_empty() {
+    // Network firewall (HTTP allowlist proxy) with a loopback-only bridge.
+    //
+    // Empty policy (offline): no firewall, no bridge — the agent stays fully
+    // offline via `--unshare-net` (added by `build_agent_command`). This is
+    // the airtight offline path and must not change.
+    //
+    // Non-empty policy: start the firewall proxy on the host loopback, then
+    // bridge it into the agent's `--unshare-net` namespace via a Unix-domain
+    // socket (host side: `FirewallHandle::start_uds_bridge`; namespace side:
+    // the `hotcell fwd` supervisor started by `build_agent_command`). The
+    // agent's HTTP_PROXY points at the in-namespace forwarder's loopback
+    // address — set by the forwarder itself once it discovers its bound port —
+    // so from the agent's view the proxy is on its own loopback and nothing
+    // else is reachable. `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` are therefore
+    // NOT set here; the forwarder sets them on the agent child.
+    //
+    // The bridge dir is cell-scoped (under the cell rootfs) so no other cell
+    // or host process can squat it, and is bind-mounted read-only into the
+    // sandbox so the agent cannot tamper with the socket. It is removed after
+    // the agent exits.
+    let bridge_dir_host: Option<(
+        AgentBridge,
+        PathBuf,
+        crate::firewall::FirewallHandle,
+    )> = if !provisioned.network.allowed_endpoints.is_empty() {
             let handle = crate::firewall::start(&provisioned.network)?;
-            let proxy_url = format!("http://{}", handle.listen_addr());
             eprintln!(
                 "network firewall: HTTP allowlist proxy on {} ({} endpoint(s))",
                 handle.listen_addr(),
                 provisioned.network.allowed_endpoints.len()
             );
-            env.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
-            env.push(("HTTPS_PROXY".to_string(), proxy_url));
-            // Keep loopback direct: the proxy only forwards CONNECT for
-            // listed endpoints, and local services should not be forced
-            // through it.
-            env.push(("NO_PROXY".to_string(), "127.0.0.1,localhost".to_string()));
-            Some(handle)
+            // Cell-scoped bridge directory under the cell rootfs. Inside the
+            // sandbox this appears at /hotcell-bridge; the host writes the
+            // Unix socket here and the in-namespace forwarder connects to it.
+            let bridge_dir = cell_fs.join("hotcell-bridge");
+            std::fs::create_dir_all(&bridge_dir)?;
+            let uds_host_path = bridge_dir.join("proxy.sock");
+            handle.start_uds_bridge(&uds_host_path)?;
+            let bridge = AgentBridge {
+                host_bridge_dir: bridge_dir.clone(),
+                uds_in_sandbox: "/hotcell-bridge/proxy.sock".to_string(),
+            };
+            // Hold the firewall handle for the lifetime of the agent so the
+            // proxy (and its UDS bridge) stay up. Bound below to keep the
+            // borrow alive across the spawn.
+            Some((bridge, bridge_dir, handle))
         } else {
             None
         };
 
+    // Split the bridge triple into the config (borrowed by build_agent_command)
+    // and the guards (handle + dir path) that must outlive the child.
+    let (bridge_cfg, bridge_guard_dir, _firewall): (
+        Option<AgentBridge>,
+        Option<PathBuf>,
+        Option<crate::firewall::FirewallHandle>,
+    ) = match bridge_dir_host {
+        Some((b, dir, h)) => (Some(b), Some(dir), Some(h)),
+        None => (None, None, None),
+    };
+
     let log_file = state::log_file_path(&cellfile.directory, name);
 
-    let mut cmd = crate::isolation::build_agent_command(&cell_fs, &workdir, &env, program, args);
+    let mut cmd = crate::isolation::build_agent_command(
+        &cell_fs,
+        &workdir,
+        &env,
+        bridge_cfg.as_ref(),
+        program,
+        args,
+    );
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -220,10 +290,17 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     let mut child = cmd.spawn()?;
     let exit_status = child.wait()?;
 
-    // The agent has exited; tear down the firewall proxy (if any) before we
-    // return. Explicit drop because the function exits via `process::exit`,
-    // which would otherwise skip the handle's `Drop`.
+    // The agent has exited; tear down the firewall proxy and the bridge dir
+    // (if any) before we return. Explicit drops because the function exits
+    // via `process::exit`, which would otherwise skip `Drop`.
     drop(_firewall);
+    if let Some(dir) = bridge_guard_dir {
+        // Best-effort cleanup of the cell-scoped bridge dir + socket. A
+        // failure leaves a harmless empty dir / stale socket under the cell
+        // rootfs, cleaned on the next run (start_uds_bridge unlinks a stale
+        // socket before binding).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     if !exit_status.success() {
         eprintln!(
@@ -273,4 +350,125 @@ fn status(ctx: &ResolveCtx) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The in-namespace forwarder supervisor (`hotcell fwd`).
+///
+/// Runs *inside* the agent's `bwrap --unshare-net` namespace alongside the
+/// agent. Binds the namespace's own `127.0.0.1` on an OS-assigned port and
+/// relays each accepted TCP connection byte-for-byte to the bridge Unix
+/// socket (`uds_path`) — which the host-side firewall UDS bridge connects to
+/// the firewall proxy. The agent's `HTTP_PROXY`/`HTTPS_PROXY` are set to this
+/// loopback address so the agent sees the proxy on its own loopback; nothing
+/// else is reachable (the namespace has only loopback; non-loopback egress is
+/// `ENETUNREACH`).
+///
+/// This is a deliberately tiny, stdlib-only TCP→Unix-socket relay. It holds
+/// no policy logic: enforcement stays in the firewall proxy. It uses blocking
+/// threads (two per connection, one per direction) with half-close on EOF so a
+/// short write on one side does not deadlock the other. When the agent child
+/// exits, the supervisor exits with its code, which tears down the listener
+/// and all relay threads.
+fn run_fwd(uds_path: &str, program: &str, args: &[String]) -> Result<()> {
+    // Bind the namespace's loopback. Port 0 lets the OS pick a free port in
+    // this (isolated) namespace; we learn the real port and feed it to the
+    // agent as HTTP_PROXY. This avoids a fixed port that could collide with
+    // an agent service.
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let proxy_url = format!("http://127.0.0.1:{port}");
+
+    // Acceptor thread: for each inbound TCP connection from the agent, spawn a
+    // relay that opens the bridge Unix socket and copies bytes both ways.
+    let uds = uds_path.to_string();
+    let _acceptor = thread::spawn(move || {
+        // accept errors mean the listener is closing (we are exiting); stop.
+        for stream in listener.incoming() {
+            match stream {
+                Ok(tcp) => {
+                    let uds = uds.clone();
+                    thread::spawn(move || {
+                        let _ = relay_tcp_to_uds(tcp, &uds);
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Spawn the agent. It inherits this process's environment (the declared
+    // cell env, set by bwrap --clearenv + --setenv) plus the proxy vars we
+    // add here. We do NOT set NO_PROXY for any external host — loopback stays
+    // direct so the agent can reach the forwarder itself.
+    let mut child = std::process::Command::new(program);
+    child.args(args);
+    child.env("HTTP_PROXY", &proxy_url);
+    child.env("HTTPS_PROXY", &proxy_url);
+    // Loopback stays direct: the forwarder is on 127.0.0.1, and any local
+    // services the agent runs should not be forced through the proxy.
+    child.env("NO_PROXY", "127.0.0.1,localhost");
+    child
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let mut child = child.spawn()?;
+    let status = child.wait()?;
+
+    // Dropping the listener would be ideal, but it is owned by the acceptor
+    // thread. Exiting the process closes the socket and reaps the threads.
+    let code = status.code().unwrap_or(-1);
+    std::process::exit(code);
+}
+
+/// Relay one agent TCP connection to the bridge Unix socket, byte-for-byte in
+/// both directions until either side closes. Two threads (one per direction);
+/// when a direction hits EOF it shuts down the peer's write half so the other
+/// thread unblocks instead of hanging on a half-open connection.
+fn relay_tcp_to_uds(tcp: std::net::TcpStream, uds_path: &str) -> std::io::Result<()> {
+    let uds = UnixStream::connect(uds_path)?;
+    let tcp_a = tcp.try_clone()?;
+    let uds_a = uds.try_clone()?;
+    // tcp -> uds
+    let t1 = thread::spawn(move || pipe(tcp_a, uds_a));
+    // uds -> tcp
+    let t2 = thread::spawn(move || pipe(uds, tcp));
+    let _ = t1.join();
+    let _ = t2.join();
+    Ok(())
+}
+
+/// Copy bytes from `r` to `w` until EOF or error, then shut down `w` for
+/// writes so the other direction of the relay unblocks (half-close instead of
+/// a full close, which would also kill the still-live direction).
+fn pipe<R: Read, W: Write + HalfClose>(mut r: R, mut w: W) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if w.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = w.shutdown_write();
+}
+
+/// Shutdown the write half of a stream. Implemented for the two concrete
+/// stream types the relay uses so `pipe` can half-close generically.
+trait HalfClose {
+    fn shutdown_write(&self) -> std::io::Result<()>;
+}
+
+impl HalfClose for std::net::TcpStream {
+    fn shutdown_write(&self) -> std::io::Result<()> {
+        self.shutdown(std::net::Shutdown::Write)
+    }
+}
+
+impl HalfClose for UnixStream {
+    fn shutdown_write(&self) -> std::io::Result<()> {
+        self.shutdown(std::net::Shutdown::Write)
+    }
 }

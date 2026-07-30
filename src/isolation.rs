@@ -36,6 +36,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// In-sandbox mount point for the bind-mounted hotcell binary, used as the
+/// forwarder supervisor when a network bridge is active. Lives outside the
+/// cell rootfs proper so the agent cannot see or tamper with the supervisor
+/// binary (the bind is read-only).
+const FORWARDER_BIN: &str = "/hotcell-fwd";
+
+/// In-sandbox mount point for the shared Unix-socket bridge directory.
+/// Bind-mounted read-only from a cell-scoped host directory so the agent can
+/// neither write to nor replace the bridge socket (it can only be connected
+/// to by the in-namespace forwarder, which is hotcell-owned code).
+const BRIDGE_DIR: &str = "/hotcell-bridge";
+
 /// Base-system directories layered read-only on top of the cell rootfs in
 /// both profiles. Provisioners should install tools under paths these do not
 /// shadow (e.g. `/opt`, `/work`, `/home`).
@@ -170,17 +182,59 @@ pub fn clean_staging(cell_fs: &Path) {
     }
 }
 
+/// Configuration for the loopback-only network bridge used when a cell has
+/// a non-empty network policy.
+///
+/// The agent runs in a `bwrap --unshare-net` namespace, so the kernel gives
+/// it *only* a private loopback interface — non-loopback egress is
+/// `ENETUNREACH` with no route to tamper with. To let the agent reach the
+/// host-side firewall proxy without exposing any network route, a tiny
+/// in-namespace forwarder (the hotcell binary itself, re-invoked as
+/// `hotcell fwd`) listens on the namespace's `127.0.0.1` and relays bytes to
+/// a Unix-domain socket. That socket lives in [`host_bridge_dir`] on the host
+/// (bind-mounted read-only into the sandbox at [`BRIDGE_DIR`]) and is
+/// connected on the host side to the firewall's TCP proxy by
+/// [`crate::firewall::FirewallHandle::start_uds_bridge`].
+///
+/// `uds_in_sandbox` is the path the forwarder connects to (e.g.
+/// `/hotcell-bridge/proxy.sock`); `host_bridge_dir` is the host-side source
+/// for the read-only bind of [`BRIDGE_DIR`].
+#[derive(Debug, Clone)]
+pub struct AgentBridge {
+    /// Host-side directory containing the bridge Unix socket, bind-mounted
+    /// read-only into the sandbox at [`BRIDGE_DIR`]. Cell-scoped (under the
+    /// cell rootfs) so no other cell or host process can squat it.
+    pub host_bridge_dir: PathBuf,
+    /// In-sandbox path of the bridge Unix socket, e.g.
+    /// `/hotcell-bridge/proxy.sock`.
+    pub uds_in_sandbox: String,
+}
 /// Build the **agent** profile command: the agent runs inside the cell rootfs
 /// (`cell_fs` as `/`) with *no* host path access, a clean environment
-/// containing only the declared `env` vars, and no network access.
+/// containing only the declared `env` vars, and network access governed by
+/// `bridge`.
 ///
-/// The network firewall (HTTP allowlist proxy) is not yet implemented; until
-/// it is, the agent is always offline. The caller must reject Cellfiles that
-/// declare a non-empty network policy rather than silently granting egress.
+/// Network handling:
+/// - `bridge = None` (empty/offline policy): `--unshare-net` is kept, so the
+///   agent has no network at all — a private loopback interface only, no
+///   route to the host. This is the airtight offline path.
+/// - `bridge = Some(_)`: `--unshare-net` is *still* kept (the namespace has
+///   only loopback, so non-loopback egress is kernel-enforced
+///   `ENETUNREACH`), and an in-namespace forwarder supervisor is launched
+///   instead of the agent directly. The supervisor (the hotcell binary,
+///   re-invoked as `hotcell fwd` and bind-mounted read-only into the sandbox)
+///   listens on the namespace's `127.0.0.1`, relays bytes to the bridge
+///   Unix socket, and spawns the agent with `HTTP_PROXY`/`HTTPS_PROXY`
+///   pointing at its own loopback address. See [`AgentBridge`].
+///
+/// The agent itself never gets a network route: it talks only to its own
+/// loopback, where the hotcell-owned forwarder enforces the indirection to
+/// the host firewall proxy.
 pub fn build_agent_command(
     cell_fs: &Path,
     workdir: &str,
     env: &[(String, String)],
+    bridge: Option<&AgentBridge>,
     program: &str,
     args: &[String],
 ) -> Command {
@@ -210,6 +264,27 @@ pub fn build_agent_command(
         &workdir_str,
     ]);
 
+    if let Some(bridge) = bridge {
+        // Bind-mount the hotcell binary itself read-only as the forwarder
+        // supervisor. `current_exe` is the running hotcell; the cell rootfs
+        // does not contain it, so we stage it out-of-band (read-only) where
+        // the agent cannot modify it.
+        let exe = std::env::current_exe()
+            .expect("determine hotcell executable path for forwarder");
+        let exe_str = exe
+            .to_str()
+            .expect("hotcell executable path must be valid UTF-8");
+        cmd.args(["--ro-bind", exe_str, FORWARDER_BIN]);
+        // Bind-mount the shared bridge directory read-only so the agent can
+        // neither write to nor replace the bridge socket. The forwarder
+        // (hotcell-owned) connects to it; the agent never touches it.
+        let bridge_host = bridge
+            .host_bridge_dir
+            .to_str()
+            .expect("bridge dir path must be valid UTF-8");
+        cmd.args(["--ro-bind", bridge_host, BRIDGE_DIR]);
+    }
+
     // Clean environment: nothing from the host leaks in. Only the declared
     // env vars are set.
     cmd.arg("--clearenv");
@@ -217,7 +292,16 @@ pub fn build_agent_command(
         cmd.args(["--setenv", k, v]);
     }
 
-    cmd.arg(program);
-    cmd.args(args);
+    if let Some(bridge) = bridge {
+        // Launch the in-namespace forwarder supervisor, which starts the
+        // loopback TCP->UDS relay, discovers its own port, sets
+        // HTTP_PROXY/HTTPS_PROXY for the agent, and spawns the agent.
+        cmd.arg(FORWARDER_BIN);
+        cmd.args(["fwd", "--uds", &bridge.uds_in_sandbox, "--", program]);
+        cmd.args(args);
+    } else {
+        cmd.arg(program);
+        cmd.args(args);
+    }
     cmd
 }
