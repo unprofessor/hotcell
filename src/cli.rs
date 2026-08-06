@@ -67,6 +67,7 @@ enum Command {
     /// (`--uds`), sets `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` for the agent to
     /// point at this loopback address, then spawns and waits on the agent
     /// program. Exits with the agent's exit code.
+    #[command(hide = true)]
     Fwd {
         /// In-sandbox path of the bridge Unix socket to relay to.
         #[arg(long)]
