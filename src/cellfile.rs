@@ -6,8 +6,11 @@
 //! declaration always reflects the current file on disk.
 //!
 //! On-disk format (v1): a minimal line-based, dotted-key text format. Blank
-//! lines and `#` comments are ignored. Keys are dotted identifiers; the
-//! recognised keys are:
+//! lines are ignored. A `#` begins a comment at the start of a line or when
+//! preceded by whitespace: everything from the `#` to end-of-line is
+//! ignored, so trailing comments may follow any `key = value` line. A `#`
+//! not preceded by whitespace is literal — `env.KEY = abc#def` keeps its
+//! `#`. Keys are dotted identifiers; the recognised keys are:
 //!
 //! ```text
 //! provision.type = shell            # provisioner kind (default: "none")
@@ -137,11 +140,11 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
     let mut decl = CellDeclaration::default();
     for (i, raw) in text.lines().enumerate() {
         let line_no = i + 1;
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let line = strip_comment(raw.trim());
+        if line.is_empty() {
             continue;
         }
-        let (key, value) = split_kv(raw, line_no, path)?;
+        let (key, value) = split_kv(line, line_no, path)?;
         let key = key.trim();
         let value = value.trim();
 
@@ -175,6 +178,20 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
         }
     }
     Ok(decl)
+}
+
+/// Strip a trailing `#` comment from a line. A `#` begins a comment only
+/// at the start of the line or when preceded by whitespace, so values like
+/// `abc#def` keep their `#`.
+fn strip_comment(line: &str) -> &str {
+    let mut prev_ws = true;
+    for (i, c) in line.char_indices() {
+        if c == '#' && prev_ws {
+            return line[..i].trim_end();
+        }
+        prev_ws = c.is_whitespace();
+    }
+    line
 }
 
 /// Split a line into `(key, value)` on the first `=`.
@@ -288,6 +305,28 @@ seed = ~/.gitconfig => /home/agent/.gitconfig
         assert!(err
             .to_string()
             .contains("unknown Cellfile key `frobnicate`"));
+    }
+
+    #[test]
+    fn trailing_comments_are_stripped() {
+        let text = "\
+provision.type = shell # inline comment
+net.allow = generativelanguage.googleapis.com:443 # Google
+net.allow = api.anthropic.com                  # Claude (anthropic)
+env.TOKEN = abc#def # not part of the value
+";
+        let decl = parse(text, &dir()).unwrap();
+        assert_eq!(decl.provisioner.kind, "shell");
+        assert_eq!(decl.network.allowed_endpoints.len(), 2);
+        assert_eq!(
+            decl.network.allowed_endpoints[0].host,
+            "generativelanguage.googleapis.com"
+        );
+        assert_eq!(decl.network.allowed_endpoints[0].port, Some(443));
+        assert_eq!(decl.network.allowed_endpoints[1].host, "api.anthropic.com");
+        assert_eq!(decl.network.allowed_endpoints[1].port, None);
+        // `#` without preceding whitespace is not a comment.
+        assert_eq!(decl.environment[0].value, "abc#def");
     }
 
     #[test]
