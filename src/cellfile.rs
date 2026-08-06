@@ -334,4 +334,45 @@ env.TOKEN = abc#def # not part of the value
         let err = parse("net.allow = host:notaport", &dir()).unwrap_err();
         assert!(err.to_string().contains("invalid port"));
     }
+
+    // ── Network-policy parse tests (added 2026-08-06, TDD session) ────────
+
+    /// RED: a bare IPv6 literal must never silently misparse. Today,
+    /// `rsplit_once(':')` turns `::1` into host `::` + port 1 — a wrong
+    /// port that would be dialed if open. Desired: parse as host `::1` with
+    /// no port, or reject the un-bracketed form outright.
+    #[test]
+    fn bare_ipv6_literal_never_misparses() {
+        match parse_endpoint("::1", 1, &dir()) {
+            Ok(ep) => {
+                assert_eq!(
+                    ep.host, "::1",
+                    "bare IPv6 must keep the full literal as the host"
+                );
+                assert_eq!(ep.port, None, "bare IPv6 must not invent a port");
+            }
+            Err(_) => {
+                // Rejecting un-bracketed IPv6 is an acceptable policy.
+            }
+        }
+    }
+
+    /// GREEN: bracketed IPv6 endpoints parse to the bracketed host + port,
+    /// which is the form hyper surfaces for CONNECT authority targets.
+    #[test]
+    fn bracketed_ipv6_endpoint_parses() {
+        let ep = parse_endpoint("[::1]:443", 1, &dir()).unwrap();
+        assert_eq!(ep.host, "[::1]");
+        assert_eq!(ep.port, Some(443));
+    }
+
+    /// RED (Phase 1): glob host patterns must be accepted by the Cellfile
+    /// parser (`net.allow = *.example.com`).
+    #[test]
+    fn glob_host_endpoint_parses() {
+        let decl = parse("net.allow = *.example.com\n", &dir()).unwrap();
+        assert_eq!(decl.network.allowed_endpoints.len(), 1);
+        assert_eq!(decl.network.allowed_endpoints[0].host, "*.example.com");
+        assert_eq!(decl.network.allowed_endpoints[0].port, None);
+    }
 }
