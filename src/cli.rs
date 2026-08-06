@@ -55,6 +55,10 @@ enum Command {
         /// Cell name. Defaults to "default".
         #[arg(long, default_value = state::DEFAULT_CELL_NAME)]
         name: String,
+        /// Skip the confirmation prompt and destroy immediately.
+        // Long-only: the global `-f` short already belongs to `--file`.
+        #[arg(long = "force")]
+        force: bool,
     },
     /// List cells for the Cellfile.
     Status,
@@ -93,7 +97,7 @@ pub fn run() -> Result<()> {
             program,
             args,
         } => run_cell(&ctx, &name, &program, &args),
-        Command::Destroy { name } => destroy_cell(&ctx, &name),
+        Command::Destroy { name, force } => destroy_cell(&ctx, &name, force),
         Command::Status => status(&ctx),
         Command::Fwd { uds, program, args } => run_fwd(&uds, &program, &args),
     }
@@ -307,7 +311,7 @@ fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Res
     std::process::exit(code);
 }
 
-fn destroy_cell(ctx: &ResolveCtx, name: &str) -> Result<()> {
+fn destroy_cell(ctx: &ResolveCtx, name: &str, force: bool) -> Result<()> {
     let cellfile = resolve(ctx)?;
     let cell = state::load_cell(&cellfile, name)?;
     // Mirrors DestroyCell: only provisioned or failed cells can be destroyed.
@@ -321,9 +325,24 @@ fn destroy_cell(ctx: &ResolveCtx, name: &str) -> Result<()> {
             cell.status().as_str()
         );
     }
+    if !force && !confirm_destroy(name)? {
+        bail!("destroy aborted");
+    }
     state::destroy_cell(&cellfile.directory, name)?;
     println!("destroyed cell {:?}", name);
     Ok(())
+}
+
+/// Ask the developer to confirm destruction: `y`/`yes` (any case) confirms;
+/// anything else — including an immediate Enter or EOF on a non-interactive
+/// stdin — means no. The prompt goes to stderr so stdout stays parseable.
+fn confirm_destroy(name: &str) -> Result<bool> {
+    eprint!("destroy cell {name:?}? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim();
+    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
 fn status(ctx: &ResolveCtx) -> Result<()> {

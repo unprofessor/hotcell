@@ -36,10 +36,16 @@ fn destroy_honors_cell_flag() {
     assert!(cell_dir.path().join(".cell").exists());
 
     // Destroy it via --cell (without --cell, destroy would look in cwd and
-    // find no state).
+    // find no state). --force bypasses the interactive confirmation prompt,
+    // which would otherwise read EOF from the test's null stdin and abort.
     let destroy = Command::new(hotcell_bin())
         .current_dir(cwd.path())
-        .args(["destroy", "--cell", cell_dir.path().to_str().unwrap()])
+        .args([
+            "destroy",
+            "--force",
+            "--cell",
+            cell_dir.path().to_str().unwrap(),
+        ])
         .output()
         .expect("destroy hotcell");
 
