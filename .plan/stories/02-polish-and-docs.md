@@ -3,10 +3,10 @@ id: polish-and-docs
 kind: story
 parent: v1-self-hostable-hotcell
 title: Polish and docs
-status: todo
+status: done
 assignee: null
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-08-12
 tags: []
 ---
 
