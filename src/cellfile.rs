@@ -102,11 +102,6 @@ pub struct Cellfile {
 }
 
 impl Cellfile {
-    /// Path to the Cellfile within its directory.
-    pub fn path(&self) -> PathBuf {
-        self.directory.join("Cellfile")
-    }
-
     /// Read the Cellfile from `directory`, fresh from disk. An empty Cellfile
     /// yields a default declaration (no-op provisioner, offline, empty env).
     /// The Cellfile is expected at `{directory}/Cellfile`.

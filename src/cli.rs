@@ -128,13 +128,6 @@ fn resolve(ctx: &ResolveCtx) -> Result<Cellfile> {
     Ok(cellfile)
 }
 
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Result<()> {
     let cellfile = resolve(ctx)?;
 

@@ -9,15 +9,13 @@ use std::path::PathBuf;
 
 use crate::cellfile::CellDeclaration;
 
-/// Cell status, matching the spec's transition graph.
+/// Cell status, derived from durable on-disk state.
 ///
-/// `Provisioning` is purely transient — it is only true while a `hotcell run`
-/// invocation is in the provisioning phase, and is never persisted. The
-/// durable statuses are derived from the state directory's contents.
+/// `Provisioning` (the transient phase) is never stored — the durable
+/// statuses are reconstructed from the state directory's markers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellStatus {
     Unprovisioned,
-    Provisioning,
     Provisioned,
     ProvisioningFailed,
 }
@@ -26,7 +24,6 @@ impl CellStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             CellStatus::Unprovisioned => "unprovisioned",
-            CellStatus::Provisioning => "provisioning",
             CellStatus::Provisioned => "provisioned",
             CellStatus::ProvisioningFailed => "provisioning_failed",
         }
@@ -66,21 +63,7 @@ pub struct Cell {
 }
 
 impl Cell {
-    pub fn new(cellfile_directory: PathBuf, name: String) -> Self {
-        Self {
-            cellfile_directory,
-            name,
-            provisioned_as: None,
-            provisioned_script_digest: None,
-            failed: false,
-            pending_program: None,
-            pending_args: Vec::new(),
-        }
-    }
-
-    /// Status derived from durable state, not stored. `Provisioning` is never
-    /// returned here — it is a transient phase tracked only within a live
-    /// `run` invocation.
+    /// Status derived from durable state, not stored.
     pub fn status(&self) -> CellStatus {
         if self.provisioned_as.is_some() {
             CellStatus::Provisioned

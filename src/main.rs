@@ -1,10 +1,7 @@
-#![allow(dead_code)] // stub modules: unused items are wired up incrementally.
-
 //! hotcell — an AI coding agent sandbox.
 //!
 //! Module layout mirrors the Allium specification:
 //! - [`cell`]: Cell entity, identity, declaration, state transitions.
-//! - [`session`]: Session entity and lifecycle.
 //! - [`provisioning`]: the provisioning phase and its outcomes.
 //! - [`isolation`]: filesystem isolation via bubblewrap.
 //! - [`firewall`]: network firewall via an HTTP allowlist proxy.
@@ -18,7 +15,6 @@ mod cli;
 mod firewall;
 mod isolation;
 mod provisioning;
-mod session;
 mod state;
 
 use anyhow::Result;
