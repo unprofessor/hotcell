@@ -25,6 +25,7 @@ fn destroy_honors_cell_flag() {
         .current_dir(cwd.path())
         .args([
             "run",
+            "-y",
             "--cell",
             cell_dir.path().to_str().unwrap(),
             "--",
@@ -77,6 +78,7 @@ fn status_honors_cell_flag() {
         .current_dir(cwd.path())
         .args([
             "run",
+            "-y",
             "--cell",
             cell_dir.path().to_str().unwrap(),
             "--",
@@ -88,6 +90,7 @@ fn status_honors_cell_flag() {
         .current_dir(cwd.path())
         .args([
             "run",
+            "-y",
             "--name",
             "alt",
             "--cell",

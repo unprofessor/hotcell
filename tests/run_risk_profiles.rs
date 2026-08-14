@@ -62,7 +62,7 @@ fn provisioner_can_read_declared_host_path() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "/opt/bin/show-marker"])
+        .args(["run", "-y", "/opt/bin/show-marker"])
         .output()
         .expect("run hotcell");
 
@@ -118,7 +118,7 @@ fn agent_cannot_see_provisioner_host_paths() {
     let agent_check = format!("test -f {}", host_marker.display());
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "--", "/bin/sh", "-c", &agent_check])
+        .args(["run", "-y", "--", "/bin/sh", "-c", &agent_check])
         .output()
         .expect("run hotcell");
 
@@ -154,7 +154,7 @@ fn agent_has_clean_environment() {
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
         .env(host_leak, "leaked")
-        .args(["run", "--", "/bin/sh", "-c", &agent_check])
+        .args(["run", "-y", "--", "/bin/sh", "-c", &agent_check])
         .output()
         .expect("run hotcell");
 
@@ -228,7 +228,7 @@ fn host_home_does_not_leak_into_cell() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "--", "/bin/sh", "-c", &check])
+        .args(["run", "-y", "--", "/bin/sh", "-c", &check])
         .output()
         .expect("run hotcell");
 

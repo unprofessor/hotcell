@@ -45,6 +45,15 @@ enum Command {
         /// Cell name. Defaults to "default".
         #[arg(long, default_value = state::DEFAULT_CELL_NAME)]
         name: String,
+
+        /// Print the bubblewrap command(s) and exit without running anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip the confirmation prompt and run immediately.
+        #[arg(short = 'y', long = "no-confirm")]
+        no_confirm: bool,
+
         /// Program to execute inside the cell.
         program: String,
         /// Arguments to pass to the program.
@@ -94,9 +103,11 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Run {
             name,
+            dry_run,
+            no_confirm,
             program,
             args,
-        } => run_cell(&ctx, &name, &program, &args),
+        } => run_cell(&ctx, &name, &program, &args, dry_run, no_confirm),
         Command::Destroy { name, force } => destroy_cell(&ctx, &name, force),
         Command::Status => status(&ctx),
         Command::Fwd { uds, program, args } => run_fwd(&uds, &program, &args),
@@ -128,10 +139,96 @@ fn resolve(ctx: &ResolveCtx) -> Result<Cellfile> {
     Ok(cellfile)
 }
 
-fn run_cell(ctx: &ResolveCtx, name: &str, program: &str, args: &[String]) -> Result<()> {
+fn run_cell(
+    ctx: &ResolveCtx,
+    name: &str,
+    program: &str,
+    args: &[String],
+    dry_run: bool,
+    no_confirm: bool,
+) -> Result<()> {
     let cellfile = resolve(ctx)?;
-
     let declaration = cellfile.declaration.clone();
+
+    // ---- Build both bwrap commands for display ----
+    let cell_fs = state::fs_dir(&cellfile.directory, name);
+    let workdir = if declaration.workdir.is_empty() {
+        "/work"
+    } else {
+        declaration.workdir.as_str()
+    };
+    let host_paths: Vec<String> = declaration.provisioner.host_paths.clone();
+    let env: Vec<(String, String)> = declaration
+        .environment
+        .iter()
+        .map(|v| (v.key.clone(), v.value.clone()))
+        .collect();
+
+    // Provisioning bwrap command (only for "shell" provisioner).
+    let prov_cmd = if declaration.provisioner.kind == "shell" {
+        let script_rel = declaration
+            .provisioner
+            .script
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("shell provisioner requires `provision.script`"))?;
+        let agent_home = declaration
+            .environment
+            .iter()
+            .find(|v| v.key == "HOME")
+            .map(|v| v.value.clone())
+            .unwrap_or_else(|| "/home/agent".to_string());
+        let control_env = vec![
+            ("HOTCELL_CELL_ROOT".into(), "/".into()),
+            ("HOTCELL_WORKDIR".into(), workdir.to_string()),
+            ("HOTCELL_WORKDIR_HOST".into(), workdir.to_string()),
+            ("HOME".into(), agent_home),
+        ];
+        Some(crate::isolation::build_provisioning_command(
+            &cell_fs,
+            &cellfile.directory,
+            &host_paths,
+            &control_env,
+            script_rel,
+        ))
+    } else {
+        None
+    };
+
+    // Agent bwrap command (no bridge at display time; shown with a note
+    // when the cell has network rules).
+    let agent_cmd =
+        crate::isolation::build_agent_command(&cell_fs, workdir, &env, None, program, args);
+
+    // ---- Display ----
+    match &prov_cmd {
+        Some(cmd) => {
+            eprintln!("=== provisioning bwrap ===");
+            eprintln!("{}", crate::isolation::format_bwrap_display(cmd));
+        }
+        None => eprintln!("provisioner: none (no bwrap during provisioning)"),
+    }
+    eprintln!("=== agent bwrap ===");
+    eprintln!("{}", crate::isolation::format_bwrap_display(&agent_cmd));
+    if !declaration.network.allowed_endpoints.is_empty() {
+        eprintln!("(network bridge args omitted from display; would be added on real run)");
+    }
+
+    // ---- Dry-run: exit before any state mutation ----
+    if dry_run {
+        std::process::exit(0);
+    }
+
+    // ---- Confirmation prompt (skipped with -y/--no-confirm) ----
+    if !no_confirm {
+        eprint!("Run this sandbox? [y/N] ");
+        std::io::stderr().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            eprintln!("run aborted");
+            std::process::exit(1);
+        }
+    }
 
     let mut cell = state::load_cell(&cellfile, name)?;
 

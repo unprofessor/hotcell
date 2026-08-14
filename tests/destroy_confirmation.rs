@@ -18,6 +18,7 @@ fn provision_cell(cwd: &std::path::Path, cell_dir: &std::path::Path) {
         .current_dir(cwd)
         .args([
             "run",
+            "-y",
             "--cell",
             cell_dir.to_str().unwrap(),
             "--",

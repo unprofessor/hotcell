@@ -20,7 +20,7 @@ fn hotcell_bin() -> String {
 fn run(dir: &std::path::Path, program: &str) -> (std::process::Output, String, String) {
     let output = Command::new(hotcell_bin())
         .current_dir(dir)
-        .args(["run", program])
+        .args(["run", "-y", program])
         .output()
         .expect("run hotcell");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -84,7 +84,7 @@ fn script_provisioner_installs_tool_visible_in_sandbox() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "/opt/bin/hello"])
+        .args(["run", "-y", "/opt/bin/hello"])
         .output()
         .expect("run hotcell");
 
@@ -188,7 +188,7 @@ fn script_provisioner_failure_fails_provisioning() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "/bin/true"])
+        .args(["run", "-y", "/bin/true"])
         .output()
         .expect("run hotcell");
 
@@ -220,7 +220,7 @@ fn script_provisioner_without_script_path_is_config_error() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "/bin/true"])
+        .args(["run", "-y", "/bin/true"])
         .output()
         .expect("run hotcell");
 

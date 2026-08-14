@@ -25,6 +25,7 @@ fn cell_flag_relocates_state_directory() {
         .current_dir(cwd.path())
         .args([
             "run",
+            "-y",
             "--cell",
             cell_dir.path().to_str().unwrap(),
             "--",
@@ -37,7 +38,7 @@ fn cell_flag_relocates_state_directory() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "hotcell run --cell failed: exit {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        "hotcell run --cell failed:  exit {:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status.code()
     );
     assert_eq!(stdout.trim_end(), "/work");
@@ -65,6 +66,7 @@ fn short_flag_c_relocates_state_directory() {
         .current_dir(cwd.path())
         .args([
             "run",
+            "-y",
             "-c",
             cell_dir.path().to_str().unwrap(),
             "--",
@@ -99,6 +101,7 @@ fn file_and_cell_combine_independently() {
         .current_dir(cwd.path())
         .args([
             "run",
+            "-y",
             "--file",
             elsewhere.path().join("Cellfile").to_str().unwrap(),
             "--cell",

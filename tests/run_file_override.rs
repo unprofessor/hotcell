@@ -26,6 +26,7 @@ fn file_flag_reads_cellfile_at_explicit_path() {
         .current_dir(dir.path())
         .args([
             "run",
+            "-y",
             "--file",
             elsewhere.path().join("Cellfile").to_str().unwrap(),
             "--",
@@ -60,6 +61,7 @@ fn short_flag_f_reads_cellfile_at_explicit_path() {
         .current_dir(dir.path())
         .args([
             "run",
+            "-y",
             "-f",
             elsewhere.path().join("Cellfile").to_str().unwrap(),
             "--",
@@ -89,7 +91,7 @@ fn file_flag_missing_file_errors() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "--file", "/no/such/Cellfile", "--", "/bin/pwd"])
+        .args(["run", "-y", "--file", "/no/such/Cellfile", "--", "/bin/pwd"])
         .output()
         .expect("run hotcell");
 
@@ -108,7 +110,7 @@ fn no_file_flag_falls_back_to_cwd_cellfile() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "--", "/bin/pwd"])
+        .args(["run", "-y", "--", "/bin/pwd"])
         .output()
         .expect("run hotcell");
 

@@ -112,7 +112,7 @@ fn spawn_echo_server() -> String {
 fn run_agent(cell_dir: &TempDir, script: &str) -> (std::process::Output, String, String) {
     let output = Command::new(hotcell_bin())
         .current_dir(cell_dir.path())
-        .args(["run", "--", PY, "-c", script])
+        .args(["run", "-y", "--", PY, "-c", script])
         .output()
         .expect("run hotcell");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();

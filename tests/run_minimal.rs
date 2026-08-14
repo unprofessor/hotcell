@@ -27,7 +27,7 @@ fn run_pwd_in_cell_prints_workdir() {
     // Run from the temp directory so hotcell finds $PWD/Cellfile.
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "/bin/pwd"])
+        .args(["run", "-y", "/bin/pwd"])
         .output()
         .expect("run hotcell");
 
@@ -54,7 +54,7 @@ fn run_relays_nonzero_exit_code() {
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
-        .args(["run", "/bin/false"])
+        .args(["run", "-y", "/bin/false"])
         .output()
         .expect("run hotcell");
 
