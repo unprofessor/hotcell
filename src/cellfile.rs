@@ -94,9 +94,22 @@ pub struct CellDeclaration {
     pub provisioner: Provisioner,
 }
 
-/// `Cellfile` external entity: a declaration file at `{directory}/Cellfile`.
+/// `Cellfile` external entity: a declaration file at
+/// `{file_directory}/Cellfile`.
+///
+/// The two directories serve different roles: [`Cellfile::file_directory`]
+/// is where the declaration file actually lives — the base for resolving
+/// `provision.script`, seeds, and relative `provision.host_path` entries —
+/// while [`Cellfile::directory`] is the root for cell state (`.cell/...`).
+/// They start equal, but `--cell` overrides only the state root, so a cell
+/// can be run from a Cellfile in one place with its state kept in another.
 #[derive(Debug, Clone)]
 pub struct Cellfile {
+    /// Directory of the Cellfile itself. Relative paths in the declaration
+    /// (`provision.script`, seeds, host paths) resolve against this.
+    pub file_directory: PathBuf,
+    /// Root for cell state (`.cell/...`). Equals `file_directory` unless
+    /// `--cell` overrides it.
     pub directory: PathBuf,
     pub declaration: CellDeclaration,
 }
@@ -109,10 +122,10 @@ impl Cellfile {
         Self::read_at(&directory.join("Cellfile"))
     }
 
-    /// Read the Cellfile at an explicit `path`, fresh from disk. The cell's
-    /// directory (used for state and bind-mounts) is the file's parent, so
-    /// state continues to live alongside the Cellfile. An empty Cellfile
-    /// yields a default declaration.
+    /// Read the Cellfile at an explicit `path`, fresh from disk. Both the
+    /// file directory and the state root start at the file's parent, so
+    /// state lives alongside the Cellfile unless `--cell` moves it. An
+    /// empty Cellfile yields a default declaration.
     pub fn read_at(path: &Path) -> anyhow::Result<Self> {
         if !path.exists() {
             anyhow::bail!("no Cellfile found at {}", path.display());
@@ -124,6 +137,7 @@ impl Cellfile {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         Ok(Self {
+            file_directory: directory.clone(),
             directory,
             declaration,
         })

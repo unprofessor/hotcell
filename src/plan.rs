@@ -208,16 +208,20 @@ pub fn build_execution_plan(
     // and (on the host side) for the workdir safety-net and the bridge dir;
     // make it absolute so the two always agree and the displayed command is
     // unambiguous even when the Cellfile/`--cell` paths were relative.
+    //
+    // Provisioning inputs (the script path, the staged Cellfile directory)
+    // resolve against the Cellfile's OWN directory, not the state root —
+    // `--cell` may have relocated the latter.
     let cell_fs = isolation::absolutize(&state::fs_dir(&cellfile.directory, name));
     let provisioning = if provisioning_will_run && declaration.provisioner.kind == "shell" {
         let script_rel = crate::provisioning::resolve_provision_script(
-            &cellfile.directory,
+            &cellfile.file_directory,
             &declaration.provisioner,
         )?;
         let control_env = crate::provisioning::provision_control_env(declaration, workdir);
         let arguments = isolation::build_provisioning_command(
             &cell_fs,
-            &cellfile.directory,
+            &cellfile.file_directory,
             &declaration.provisioner.host_paths,
             &control_env,
             &script_rel,

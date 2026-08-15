@@ -211,6 +211,66 @@ fn script_provisioner_failure_fails_provisioning() {
     );
 }
 
+/// `--cell` relocates cell state without breaking the shell provisioner:
+/// the script and its relative paths still resolve next to the Cellfile,
+/// while the provisioned rootfs lands under the `--cell` directory.
+#[test]
+fn cell_override_with_shell_provisioner() {
+    let dir = TempDir::new().expect("create temp dir");
+    let cell_dir = TempDir::new().expect("create cell dir");
+
+    fs::write(
+        dir.path().join("Cellfile"),
+        "provision.type = shell\nprovision.script = ./provision.sh\nworkdir = /work\n",
+    )
+    .expect("write Cellfile");
+    fs::write(
+        dir.path().join("provision.sh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n\
+         mkdir -p \"$HOTCELL_CELL_ROOT/opt/bin\" \"$HOTCELL_WORKDIR_HOST\"\n\
+         printf '#!/usr/bin/env bash\\necho cell-override-ok\\n' > \"$HOTCELL_CELL_ROOT/opt/bin/hello\"\n\
+         chmod +x \"$HOTCELL_CELL_ROOT/opt/bin/hello\"\n",
+    )
+    .expect("write provision.sh");
+    fs::set_permissions(
+        dir.path().join("provision.sh"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod provision.sh");
+
+    let output = Command::new(hotcell_bin())
+        .current_dir(dir.path())
+        .args([
+            "run",
+            "-y",
+            "--cell",
+            cell_dir.path().to_str().unwrap(),
+            "--",
+            "/opt/bin/hello",
+        ])
+        .output()
+        .expect("run hotcell");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "--cell run failed: exit {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+    assert_eq!(stdout.trim_end(), "cell-override-ok");
+    assert!(
+        cell_dir.path().join(".cell/default").exists(),
+        "state must live under the --cell directory"
+    );
+    assert!(
+        !dir.path().join(".cell").exists(),
+        "state must not leak next to the Cellfile"
+    );
+}
+
+/// Selects the shell provisioner but omits provision.script; a hard config
+/// error, not a provisioning failure.
 #[test]
 fn script_provisioner_without_script_path_is_config_error() {
     let dir = TempDir::new().expect("create temp dir");

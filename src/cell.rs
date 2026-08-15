@@ -37,7 +37,13 @@ impl CellStatus {
 /// module; it is not serialized as a single blob.
 #[derive(Debug, Clone)]
 pub struct Cell {
+    /// Root for cell state (`.cell/...`). The `--cell` override lands here,
+    /// independently of where the Cellfile lives.
     pub cellfile_directory: PathBuf,
+    /// Directory of the Cellfile itself — where `provision.script` and
+    /// relative declaration paths resolve. Distinct from `cellfile_directory`
+    /// when `--cell` relocates state.
+    pub file_directory: PathBuf,
     pub name: String,
 
     /// The declaration the cell was last provisioned with. `None` unless the

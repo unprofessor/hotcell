@@ -219,7 +219,9 @@ pub fn provision(
 
     let ctx = ProvisionContext {
         cell_root: cell_root.clone(),
-        cellfile_directory: cell.cellfile_directory.clone(),
+        // Script paths in error messages resolve next to the Cellfile, not
+        // under the (possibly `--cell`-overridden) state root.
+        cellfile_directory: cell.file_directory.clone(),
         workdir,
     };
 

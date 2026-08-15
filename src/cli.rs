@@ -166,7 +166,9 @@ fn run_cell(
     // disk, re-running the provisioner would only reproduce the same rootfs,
     // so we short-circuit. A mismatch (or a legacy record with no digest)
     // falls through to a full re-provision.
-    let current_digest = provision_digest(&cellfile.directory, &declaration.provisioner)?;
+    // Provisioning inputs resolve against the Cellfile's own directory, not
+    // the (possibly `--cell`-overridden) state root.
+    let current_digest = provision_digest(&cellfile.file_directory, &declaration.provisioner)?;
     let already_current =
         cell.is_current(&declaration) && cell.provisioned_script_digest == current_digest;
 

@@ -91,6 +91,7 @@ pub fn load_cell(cellfile: &Cellfile, name: &str) -> anyhow::Result<Cell> {
     let failed = dir.join(FAILED_MARKER).exists();
     Ok(Cell {
         cellfile_directory: cellfile.directory.clone(),
+        file_directory: cellfile.file_directory.clone(),
         name: name.to_string(),
         provisioned_as,
         provisioned_script_digest: script_digest,
