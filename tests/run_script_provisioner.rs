@@ -131,7 +131,7 @@ fn shell_provisioner_skips_when_script_unchanged() {
     );
     assert_eq!(stdout.trim_end(), "provisioned-marker");
     assert!(
-        stderr.contains("skipping provisioning"),
+        stderr.contains("provisioning: skipped"),
         "second run should skip re-provisioning: {stderr}"
     );
 

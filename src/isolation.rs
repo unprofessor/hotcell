@@ -46,7 +46,7 @@ const FORWARDER_BIN: &str = "/hotcell-fwd";
 /// Bind-mounted read-only from a cell-scoped host directory so the agent can
 /// neither write to nor replace the bridge socket (it can only be connected
 /// to by the in-namespace forwarder, which is hotcell-owned code).
-const BRIDGE_DIR: &str = "/hotcell-bridge";
+pub const BRIDGE_DIR: &str = "/hotcell-bridge";
 
 /// Base-system directories layered read-only on top of the cell rootfs in
 /// both profiles. Provisioners should install tools under paths these do not
@@ -305,58 +305,4 @@ pub fn build_agent_command(
         cmd.args(args);
     }
     cmd
-}
-
-/// Format a `Command` as a copy-pasteable shell invocation: one arg per line
-/// with trailing ` \` continuations. Everything after a `--` separator is
-/// kept as a single trailing line (the sandboxed command + its args) so it
-/// can be copied verbatim into a shell.
-pub fn format_bwrap_display(cmd: &Command) -> String {
-    let program = cmd.get_program().to_string_lossy().to_string();
-    let args: Vec<String> = cmd
-        .get_args()
-        .map(|a| a.to_string_lossy().to_string())
-        .collect();
-    let mut lines: Vec<String> = Vec::new();
-
-    if let Some(sep) = args.iter().position(|a| a == "--") {
-        // Program line with continuation.
-        lines.push(format!("{program} \\"));
-        // Each bwrap flag/arg before `--` gets its own line with ` \`.
-        for arg in &args[..sep] {
-            lines.push(format!("  {} \\", shell_quote(arg)));
-        }
-        // The `--` separator itself gets a continuation backslash.
-        lines.push(format!("  {} \\", shell_quote("--")));
-        // Everything after `--` is one line (the sandboxed command), no backslash.
-        let rest: Vec<String> = args[(sep + 1)..].iter().map(|a| shell_quote(a)).collect();
-        lines.push(format!("  {}", rest.join(" ")));
-    } else {
-        // No `--` separator: every arg is a bwrap option.
-        if args.is_empty() {
-            lines.push(program);
-        } else {
-            lines.push(format!("{program} \\"));
-            let last = args.len() - 1;
-            for (i, arg) in args.iter().enumerate() {
-                if i == last {
-                    lines.push(format!("  {}", shell_quote(arg)));
-                } else {
-                    lines.push(format!("  {} \\", shell_quote(arg)));
-                }
-            }
-        }
-    }
-
-    lines.join("\n")
-}
-
-/// Shell-quote a string if it contains characters that would be mangled by
-/// shell word splitting or quote processing.
-fn shell_quote(s: &str) -> String {
-    if s.is_empty() || s.contains(' ') || s.contains('\'') || s.contains('"') || s.contains('\\') {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    } else {
-        s.to_string()
-    }
 }

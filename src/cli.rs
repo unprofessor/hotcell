@@ -2,8 +2,11 @@
 //!
 //! Mirrors the `DeveloperCLI` surface: status discovery is per-directory
 //! (scoped to `$PWD/Cellfile`), and the developer can run and destroy cells.
-//! `hotcell run` blocks until the program exits, relaying stdio faithfully
-//! and passing the exit code through.
+//! `hotcell run` first compiles the run into an execution plan (see
+//! [`crate::plan`]), shows it, and gates execution behind a confirmation
+//! prompt unless `-y` was given (`--dry-run` prints and exits). The run then
+//! blocks until the program exits, relaying stdio faithfully and passing the
+//! exit code through.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -17,7 +20,6 @@ use clap::{Parser, Subcommand};
 
 use crate::cell::CellStatus;
 use crate::cellfile::Cellfile;
-use crate::isolation::AgentBridge;
 use crate::provisioning::{provision, provision_digest, ProvisionOutcome};
 use crate::state;
 
@@ -46,7 +48,8 @@ enum Command {
         #[arg(long, default_value = state::DEFAULT_CELL_NAME)]
         name: String,
 
-        /// Print the bubblewrap command(s) and exit without running anything.
+        /// Print the execution plan (the exact commands that would run) and
+        /// exit without running anything.
         #[arg(long)]
         dry_run: bool,
 
@@ -150,68 +153,31 @@ fn run_cell(
     let cellfile = resolve(ctx)?;
     let declaration = cellfile.declaration.clone();
 
-    // ---- Build both bwrap commands for display ----
-    let cell_fs = state::fs_dir(&cellfile.directory, name);
-    let workdir = if declaration.workdir.is_empty() {
-        "/work"
-    } else {
-        declaration.workdir.as_str()
-    };
-    let host_paths: Vec<String> = declaration.provisioner.host_paths.clone();
-    let env: Vec<(String, String)> = declaration
-        .environment
-        .iter()
-        .map(|v| (v.key.clone(), v.value.clone()))
-        .collect();
+    let mut cell = state::load_cell(&cellfile, name)?;
 
-    // Provisioning bwrap command (only for "shell" provisioner).
-    let prov_cmd = if declaration.provisioner.kind == "shell" {
-        let script_rel = declaration
-            .provisioner
-            .script
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("shell provisioner requires `provision.script`"))?;
-        let agent_home = declaration
-            .environment
-            .iter()
-            .find(|v| v.key == "HOME")
-            .map(|v| v.value.clone())
-            .unwrap_or_else(|| "/home/agent".to_string());
-        let control_env = vec![
-            ("HOTCELL_CELL_ROOT".into(), "/".into()),
-            ("HOTCELL_WORKDIR".into(), workdir.to_string()),
-            ("HOTCELL_WORKDIR_HOST".into(), workdir.to_string()),
-            ("HOME".into(), agent_home),
-        ];
-        Some(crate::isolation::build_provisioning_command(
-            &cell_fs,
-            &cellfile.directory,
-            &host_paths,
-            &control_env,
-            script_rel,
-        ))
-    } else {
-        None
-    };
+    // Carry the program/args through the provisioning phase in memory.
+    cell.pending_program = Some(program.to_string());
+    cell.pending_args = args.to_vec();
 
-    // Agent bwrap command (no bridge at display time; shown with a note
-    // when the cell has network rules).
-    let agent_cmd =
-        crate::isolation::build_agent_command(&cell_fs, workdir, &env, None, program, args);
+    // Decide whether provisioning will run. Read-only: loads the cell's
+    // durable state and digests the provision script; creates nothing. The
+    // shell provisioner records a SHA-256 of its script in
+    // `provisioned_as.json`; if that digest still matches the script on
+    // disk, re-running the provisioner would only reproduce the same rootfs,
+    // so we short-circuit. A mismatch (or a legacy record with no digest)
+    // falls through to a full re-provision.
+    let current_digest = provision_digest(&cellfile.directory, &declaration.provisioner)?;
+    let already_current =
+        cell.is_current(&declaration) && cell.provisioned_script_digest == current_digest;
 
-    // ---- Display ----
-    match &prov_cmd {
-        Some(cmd) => {
-            eprintln!("=== provisioning bwrap ===");
-            eprintln!("{}", crate::isolation::format_bwrap_display(cmd));
-        }
-        None => eprintln!("provisioner: none (no bwrap during provisioning)"),
-    }
-    eprintln!("=== agent bwrap ===");
-    eprintln!("{}", crate::isolation::format_bwrap_display(&agent_cmd));
-    if !declaration.network.allowed_endpoints.is_empty() {
-        eprintln!("(network bridge args omitted from display; would be added on real run)");
-    }
+    // Compile the whole run into an execution plan *before* doing anything:
+    // the steps displayed below are the very same `Command` values that will
+    // later be executed. Building the plan has no side effects.
+    let mut plan =
+        crate::plan::build_execution_plan(&cellfile, name, program, args, !already_current)?;
+
+    // ---- Display the plan ----
+    eprintln!("{}", plan.render());
 
     // ---- Dry-run: exit before any state mutation ----
     if dry_run {
@@ -230,36 +196,16 @@ fn run_cell(
         }
     }
 
-    let mut cell = state::load_cell(&cellfile, name)?;
-
-    // Carry the program/args through the provisioning phase in memory.
-    cell.pending_program = Some(program.to_string());
-    cell.pending_args = args.to_vec();
-
-    // Skip re-provisioning when the cell is already provisioned with the
-    // current declaration AND the provisioning inputs are unchanged. The
-    // shell provisioner records a SHA-256 of its script in
-    // `provisioned_as.json`; if that digest still matches the script on
-    // disk, re-running the provisioner would only reproduce the same rootfs,
-    // so we short-circuit. A mismatch (or a legacy record with no digest)
-    // falls through to a full re-provision.
-    let current_digest = provision_digest(&cellfile.directory, &declaration.provisioner)?;
-    let already_current =
-        cell.is_current(&declaration) && cell.provisioned_script_digest == current_digest;
-    if already_current {
-        eprintln!(
-            "cell {:?} already provisioned with current inputs; skipping provisioning",
-            name
-        );
-    } else {
+    if !already_current {
         // Enter the provisioning phase: clear durable markers so a crash leaves
         // the cell unprovisioned rather than stuck.
         state::begin_provisioning(&cellfile.directory, name)?;
 
         // Provisioning phase: the provisioner seeds the
         // cell's rootfs. Mirrors ProvisionSucceeds / ProvisionFails and the
-        // ProvisioningLogsToConsole guarantee.
-        let outcome = provision(&cell, &declaration)?;
+        // ProvisioningLogsToConsole guarantee. The sandbox command comes
+        // from the plan (the very command that was displayed).
+        let outcome = provision(&cell, &declaration, &mut plan)?;
         let declaration = match outcome {
             ProvisionOutcome::Succeeded(d) => d,
             ProvisionOutcome::Failed(err) => {
@@ -281,24 +227,10 @@ fn run_cell(
     // Launch the agent inside the isolated sandbox, relaying stdio.
     // Mirrors RelayOnly / CleanEnvironment / ProvisionedEnvironment.
     let provisioned = cell.provisioned_as.as_ref().expect("just provisioned");
-    let env: Vec<(String, String)> = provisioned
-        .environment
-        .iter()
-        .map(|v| (v.key.clone(), v.value.clone()))
-        .collect();
 
-    // In-sandbox workdir from the provisioned declaration; config default is
-    // "/work". The host-side backing lives under the cell's rootfs and is
-    // created by the provisioner (or the safety-net below).
-    let workdir = if provisioned.workdir.is_empty() {
-        "/work".to_string()
-    } else {
-        provisioned.workdir.clone()
-    };
-
-    let cell_fs = state::fs_dir(&cellfile.directory, name);
-    // Safety net: ensure the workdir exists even if a provisioner forgot to.
-    let workdir_host = crate::provisioning::workdir_host_path(&cell_fs, &workdir);
+    // Safety net: ensure the plan's workdir exists on the host side of the
+    // cell rootfs even if a provisioner forgot to create it.
+    let workdir_host = crate::provisioning::workdir_host_path(&plan.cell_fs, &plan.workdir);
     std::fs::create_dir_all(&workdir_host)?;
 
     // Network firewall (HTTP allowlist proxy) with a loopback-only bridge.
@@ -308,21 +240,22 @@ fn run_cell(
     // the airtight offline path and must not change.
     //
     // Non-empty policy: start the firewall proxy on the host loopback, then
-    // bridge it into the agent's `--unshare-net` namespace via a Unix-domain
-    // socket (host side: `FirewallHandle::start_uds_bridge`; namespace side:
-    // the `hotcell fwd` supervisor started by `build_agent_command`). The
-    // agent's HTTP_PROXY points at the in-namespace forwarder's loopback
-    // address — set by the forwarder itself once it discovers its bound port —
-    // so from the agent's view the proxy is on its own loopback and nothing
-    // else is reachable. `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` are therefore
-    // NOT set here; the forwarder sets them on the agent child.
+    // bridge it into the agent's `--unshare-net` namespace. The bridge dir
+    // and socket are created at exactly the paths the plan's displayed
+    // `--ro-bind` / `--uds` arguments name (host side: `::start_uds_bridge`;
+    // namespace side: the `hotcell fwd` supervisor). The agent's
+    // HTTP_PROXY points at the in-namespace forwarder's loopback address —
+    // set by the forwarder itself once it discovers its bound port — so from
+    // the agent's view the proxy is on its own loopback and nothing else is
+    // reachable. `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` are therefore NOT set
+    // here; the forwarder sets them on the agent child.
     //
     // The bridge dir is cell-scoped (under the cell rootfs) so no other cell
     // or host process can squat it, and is bind-mounted read-only into the
     // sandbox so the agent cannot tamper with the socket. It is removed after
     // the agent exits.
-    let bridge_dir_host: Option<(AgentBridge, PathBuf, crate::firewall::FirewallHandle)> =
-        if !provisioned.network.allowed_endpoints.is_empty() {
+    let bridge_guard: Option<(PathBuf, crate::firewall::FirewallHandle)> =
+        if let Some(bridge) = &plan.bridge {
             let handle = crate::firewall::start(&provisioned.network)?;
             eprintln!(
                 "network firewall: HTTP allowlist proxy on {} ({} endpoint(s))",
@@ -330,59 +263,35 @@ fn run_cell(
                 provisioned.network.allowed_endpoints.len()
             );
             // Cell-scoped bridge directory under the cell rootfs. Inside the
-            // sandbox this appears at /hotcell-bridge; the host writes the
-            // Unix socket here and the in-namespace forwarder connects to it.
-            let bridge_dir = cell_fs.join("hotcell-bridge");
-            std::fs::create_dir_all(&bridge_dir)?;
-            let uds_host_path = bridge_dir.join("proxy.sock");
+            // sandbox this appears at /hotcell-bridge; the host writes the Unix
+            // socket here and the in-namespace forwarder connects to it.
+            std::fs::create_dir_all(&bridge.host_bridge_dir)?;
+            let uds_host_path = bridge.host_bridge_dir.join("proxy.sock");
             handle.start_uds_bridge(&uds_host_path)?;
-            let bridge = AgentBridge {
-                host_bridge_dir: bridge_dir.clone(),
-                uds_in_sandbox: "/hotcell-bridge/proxy.sock".to_string(),
-            };
             // Hold the firewall handle for the lifetime of the agent so the
-            // proxy (and its UDS bridge) stay up. Bound below to keep the
-            // borrow alive across the spawn.
-            Some((bridge, bridge_dir, handle))
+            // proxy (and its UDS bridge) stay up.
+            Some((bridge.host_bridge_dir.clone(), handle))
         } else {
             None
         };
 
-    // Split the bridge triple into the config (borrowed by build_agent_command)
-    // and the guards (handle + dir path) that must outlive the child.
-    let (bridge_cfg, bridge_guard_dir, _firewall): (
-        Option<AgentBridge>,
-        Option<PathBuf>,
-        Option<crate::firewall::FirewallHandle>,
-    ) = match bridge_dir_host {
-        Some((b, dir, h)) => (Some(b), Some(dir), Some(h)),
-        None => (None, None, None),
-    };
-
     let log_file = state::log_file_path(&cellfile.directory, name);
-
-    let mut cmd = crate::isolation::build_agent_command(
-        &cell_fs,
-        &workdir,
-        &env,
-        bridge_cfg.as_ref(),
-        program,
-        args,
-    );
-    cmd.stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-
     eprintln!("session log: {}", log_file.display());
 
-    let mut child = cmd.spawn()?;
+    // Execute the agent step exactly as displayed.
+    plan.agent
+        .command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let mut child = plan.agent.command.spawn()?;
     let exit_status = child.wait()?;
 
     // The agent has exited; tear down the firewall proxy and the bridge dir
     // (if any) before we return. Explicit drops because the function exits
     // via `process::exit`, which would otherwise skip `Drop`.
-    drop(_firewall);
-    if let Some(dir) = bridge_guard_dir {
+    if let Some((dir, handle)) = bridge_guard {
+        drop(handle);
         // Best-effort cleanup of the cell-scoped bridge dir + socket. A
         // failure leaves a harmless empty dir / stale socket under the cell
         // rootfs, cleaned on the next run (start_uds_bridge unlinks a stale

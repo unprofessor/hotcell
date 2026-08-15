@@ -87,7 +87,7 @@ offline, with a working directory at `/work`.
 Provision a cell (if needed) and run a program inside it.
 
 ```bash
-hotcell run [--name <name>] [--file <path>] [--cell <dir>] -- <program> [args...]
+hotcell run [--name <name>] [--file <path>] [--cell <dir>] [-y] [--dry-run] -- <program> [args...]
 ```
 
 - `--name` — cell name (default: `default`). Multiple cells can share one
@@ -95,7 +95,18 @@ hotcell run [--name <name>] [--file <path>] [--cell <dir>] -- <program> [args...
 - `--file` — path to an explicit Cellfile (default: `$PWD/Cellfile`).
 - `--cell` — override where cell state lives (independent of the Cellfile
   location).
+- `-y, --no-confirm` — skip the confirmation prompt (the plan is still
+  displayed).
+- `--dry-run` — print the execution plan and exit without running anything;
+  no state is created or modified.
 - `--` — everything after this is the program and its arguments.
+
+Before any sandbox starts, hotcell prints its **execution plan**: every
+`bwrap` command it will run, one argument per line with shell continuations
+and POSIX quoting, so the block can be copy-pasted verbatim into a terminal.
+The commands shown are the commands run — execution walks the same plan that
+was displayed. A `[y/N]` confirmation prompt then gates the run unless
+`--dry-run` (prints and exits) or `-y` (runs immediately) is given.
 
 **Exit code:** mirrors the program's exit code. If provisioning fails, exits
 with 1.
