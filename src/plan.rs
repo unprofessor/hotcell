@@ -2,10 +2,12 @@
 //! execute, compiled up front from read-only inputs.
 //!
 //! The plan is the single source of truth for both display and execution.
-//! The developer is shown exactly this list (via [`ExecutionPlan::render`]),
-//! and the run then executes the plan's own [`Command`] values — there is
-//! no second construction site that could drift from what was displayed.
-//! What you see is the command that runs, value for value.
+//! Each step is composed symbolically as a list of [`Argument`]s — a flag
+//! plus its values — the form the developer is shown (via
+//! [`ExecutionPlan::render`]), and the same list collapses into the argv of
+//! the `bwrap` process that actually runs. There is no second construction
+//! site that could drift from what was displayed: what you see is the
+//! command that runs, value for value.
 //!
 //! Building a plan has zero side effects: it reads the Cellfile, the cell's
 //! durable state, and (for the shell provisioner) the provision script, but
@@ -16,24 +18,38 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::process::Command;
 
 use anyhow::Result;
 use shlex::try_quote;
 
 use crate::cellfile::Cellfile;
-use crate::isolation::{self, AgentBridge, BRIDGE_DIR};
+use crate::isolation::{self, AgentBridge, Argument, BRIDGE_DIR};
 use crate::state;
 
 /// Default in-sandbox working directory when the Cellfile declares none.
 pub const DEFAULT_WORKDIR: &str = "/work";
 
-/// One planned command.
+/// One planned command: a label plus the `bwrap` arguments it will run
+/// with. The arguments are the source of truth — [`PlanStep::command`]
+/// collapses them for execution, [`ExecutionPlan::render`] renders them for
+/// display — so the two can never diverge.
 pub struct PlanStep {
     /// Short label shown in the rendered plan ("provisioning", "agent").
     pub label: &'static str,
-    /// The exact command that will be spawned when this step executes.
-    pub command: Command,
+    /// The exact bwrap arguments that will be spawned when this step runs.
+    pub arguments: Vec<Argument>,
+}
+
+impl PlanStep {
+    fn new(label: &'static str, arguments: Vec<Argument>) -> PlanStep {
+        PlanStep { label, arguments }
+    }
+
+    /// Collapse the planned arguments into an executable `Command` (argv
+    /// order preserved: flag, its values, next flag, ...).
+    pub fn command(&self) -> std::process::Command {
+        isolation::collapse(&self.arguments)
+    }
 }
 
 /// The complete plan for one `hotcell run`.
@@ -62,17 +78,19 @@ pub struct ExecutionPlan {
 
 impl ExecutionPlan {
     /// Render the plan for display: each step as a copy-pasteable shell
-    /// invocation — one arg per line with `\` continuations; everything
-    /// after a `--` separator stays on one line (the sandboxed command and
-    /// its args). Every arg is POSIX-quoted via `shlex`, so the block runs
-    /// verbatim when pasted into a shell.
+    /// invocation — one line per argument (`--flag value1 value2`) with `\`
+    /// continuations, so line breaks fall only between flags. The final
+    /// argument is the command separator: `-- \` on its own line, then the
+    /// sandboxed command as one unbroken line. Every flag and value is
+    /// POSIX-quoted via `shlex`, so the block runs verbatim when pasted
+    /// into a shell.
     pub fn render(&self) -> String {
         let mut blocks: Vec<String> = Vec::new();
         match &self.provisioning {
             Some(step) => blocks.push(format!(
                 "=== {} bwrap ===\n{}",
                 step.label,
-                render_step(step)
+                render_step(&step.arguments)
             )),
             None if self.provisioning_skipped => blocks.push(
                 "provisioning: skipped (cell already provisioned with current inputs)".to_string(),
@@ -82,7 +100,7 @@ impl ExecutionPlan {
         blocks.push(format!(
             "=== {} bwrap ===\n{}",
             self.agent.label,
-            render_step(&self.agent)
+            render_step(&self.agent.arguments)
         ));
         let mut out = blocks.join("\n\n");
         if self.bridge.is_some() {
@@ -95,50 +113,60 @@ impl ExecutionPlan {
     }
 }
 
-/// Format one planned command as a copy-pasteable shell invocation.
-fn render_step(step: &PlanStep) -> String {
-    let program = step.command.get_program().to_string_lossy().to_string();
-    let args: Vec<String> = step
-        .command
-        .get_args()
-        .map(|a| {
-            let s = a.to_string_lossy();
-            // try_quote fails only on NUL bytes, which cannot occur in an
-            // argv string that exec would accept.
-            try_quote(&s).unwrap_or(Cow::Borrowed("''")).into_owned()
-        })
-        .collect();
-    let mut lines: Vec<String> = Vec::new();
-
-    if let Some(sep) = args.iter().position(|a| a == "--") {
-        // Program line with continuation.
-        lines.push(format!("{program} \\"));
-        // Each bwrap flag/arg before `--` gets its own line with ` \`.
-        for arg in &args[..sep] {
-            lines.push(format!("  {} \\", arg));
-        }
-        // The `--` separator itself gets a continuation backslash.
-        lines.push(format!("  {} \\", args[sep]));
-        // Everything after `--` is one line (the sandboxed command), no backslash.
-        lines.push(format!("  {}", args[(sep + 1)..].join(" ")));
-    } else {
-        // No `--` separator: every arg is a bwrap option.
-        if args.is_empty() {
-            lines.push(program);
-        } else {
-            lines.push(format!("{program} \\"));
-            let last = args.len() - 1;
-            for (i, arg) in args.iter().enumerate() {
-                if i == last {
-                    lines.push(format!("  {}", arg));
-                } else {
-                    lines.push(format!("  {} \\", arg));
-                }
+/// Format one planned command as a copy-pasteable shell invocation: one
+/// line per [`Argument`] — `--flag value1 value2` — with a `\` continuation
+/// on every line except the last. Because the arguments are structured, each
+/// flag always stays with its values, and the command (`Argument { flag:
+/// "--", ... }`) is wrapped after the separator: `-- \` on its own line,
+/// then `/bin/echo hello world` as the final unbroken line. Every flag and
+/// value is POSIX-quoted via `shlex`, so the block runs verbatim when
+/// pasted into a shell (line breaks fall only between arguments, and a
+/// continuation joins them back into the same argv).
+fn render_step(arguments: &[Argument]) -> String {
+    if arguments.is_empty() {
+        return "bwrap".to_string();
+    }
+    let mut lines: Vec<String> = vec!["bwrap \\".to_string()];
+    let last = arguments.len() - 1;
+    for (i, arg) in arguments.iter().enumerate() {
+        let is_last = i == last;
+        // The command separator gets its own line with a continuation; the
+        // sandboxed command follows on its own final, unbroken line:
+        // `-- \` then `/bin/echo hello world`.
+        if is_last && arg.flag == "--" {
+            if arg.values.is_empty() {
+                lines.push("  --".to_string());
+            } else {
+                lines.push("  -- \\".to_string());
+                let command = arg
+                    .values
+                    .iter()
+                    .map(|value| quote_arg(value))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                lines.push(format!("  {command}"));
             }
+            continue;
+        }
+        let line = std::iter::once(&arg.flag)
+            .chain(arg.values.iter())
+            .map(|s| quote_arg(s))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if is_last {
+            lines.push(format!("  {line}"));
+        } else {
+            lines.push(format!("  {line} \\"));
         }
     }
-
     lines.join("\n")
+}
+
+/// POSIX-quote one flag or value for shell display.
+fn quote_arg(s: &str) -> String {
+    // try_quote fails only on NUL bytes, which cannot occur in an argv
+    // string that exec would accept.
+    try_quote(s).unwrap_or(Cow::Borrowed("''")).into_owned()
 }
 
 /// Compile the plan for a `hotcell run`. All inputs are read-only (Cellfile,
@@ -159,7 +187,6 @@ pub fn build_execution_plan(
     // Fail fast on config errors, before anything is displayed or prompted.
     crate::provisioning::validate_provisioner(&declaration.provisioner)?;
 
-    let cell_fs = state::fs_dir(&cellfile.directory, name);
     let workdir = if declaration.workdir.is_empty() {
         DEFAULT_WORKDIR
     } else {
@@ -176,23 +203,26 @@ pub fn build_execution_plan(
     // never gets one. When the cell is already provisioned with current
     // inputs, provisioning is skipped entirely and the step is omitted so
     // the displayed plan matches the executed run.
+    //
+    // The cell rootfs is used both as a bind source in the plan's arguments
+    // and (on the host side) for the workdir safety-net and the bridge dir;
+    // make it absolute so the two always agree and the displayed command is
+    // unambiguous even when the Cellfile/`--cell` paths were relative.
+    let cell_fs = isolation::absolutize(&state::fs_dir(&cellfile.directory, name));
     let provisioning = if provisioning_will_run && declaration.provisioner.kind == "shell" {
         let script_rel = crate::provisioning::resolve_provision_script(
             &cellfile.directory,
             &declaration.provisioner,
         )?;
         let control_env = crate::provisioning::provision_control_env(declaration, workdir);
-        let command = isolation::build_provisioning_command(
+        let arguments = isolation::build_provisioning_command(
             &cell_fs,
             &cellfile.directory,
             &declaration.provisioner.host_paths,
             &control_env,
             &script_rel,
         );
-        Some(PlanStep {
-            label: "provisioning",
-            command,
-        })
+        Some(PlanStep::new("provisioning", arguments))
     } else {
         None
     };
@@ -208,17 +238,10 @@ pub fn build_execution_plan(
         })
     };
 
-    let agent = PlanStep {
-        label: "agent",
-        command: isolation::build_agent_command(
-            &cell_fs,
-            workdir,
-            &env,
-            bridge.as_ref(),
-            program,
-            args,
-        ),
-    };
+    let agent = PlanStep::new(
+        "agent",
+        isolation::build_agent_command(&cell_fs, workdir, &env, bridge.as_ref(), program, args),
+    );
 
     Ok(ExecutionPlan {
         cell_fs,

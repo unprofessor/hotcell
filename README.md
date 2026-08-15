@@ -102,10 +102,11 @@ hotcell run [--name <name>] [--file <path>] [--cell <dir>] [-y] [--dry-run] -- <
 - `--` — everything after this is the program and its arguments.
 
 Before any sandbox starts, hotcell prints its **execution plan**: every
-`bwrap` command it will run, one argument per line with shell continuations
-and POSIX quoting, so the block can be copy-pasted verbatim into a terminal.
-The commands shown are the commands run — execution walks the same plan that
-was displayed. A `[y/N]` confirmation prompt then gates the run unless
+`bwrap` command it will run — one flag (with its values) per line,
+backslash continuations, POSIX quoting, and all host paths shown absolute —
+so the block can be copy-pasted verbatim into a terminal. The commands
+shown are the commands run: execution walks the same plan that was
+displayed. A `[y/N]` confirmation prompt then gates the run unless
 `--dry-run` (prints and exits) or `-y` (runs immediately) is given.
 
 **Exit code:** mirrors the program's exit code. If provisioning fails, exits

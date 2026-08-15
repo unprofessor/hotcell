@@ -31,8 +31,15 @@ fn dry_run_prints_plan_and_creates_no_state() {
     assert!(output.status.success(), "dry-run should exit 0: {stderr}");
     assert!(stderr.contains("=== agent bwrap ==="), "stderr: {stderr}");
     assert!(stderr.contains("bwrap \\"), "stderr: {stderr}");
+    // A flag and its values stay on one line.
+    assert!(
+        stderr.contains("  --ro-bind /usr /usr \\"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("  --chdir /work \\"), "stderr: {stderr}");
+    // The separator gets its own continuation line; the sandboxed command
+    // and its args follow on one final unbroken line, POSIX-quoted.
     assert!(stderr.contains("  -- \\"), "stderr: {stderr}");
-    // The sandboxed command and its args stay on one final line.
     assert!(
         stderr.contains("  /bin/echo 'hello world'"),
         "stderr: {stderr}"
@@ -249,4 +256,57 @@ fn missing_script_fails_before_prompt() {
         !dir.path().join(".cell").exists(),
         "no state on config error"
     );
+}
+
+/// Relative host paths — a relative `--file`, or a relative
+/// `provision.host_path` — are absolutized in the plan, so the displayed
+/// command is unambiguous and resolves identically when copied and pasted
+/// from any directory.
+#[test]
+fn dry_run_absolutizes_relative_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    fs::create_dir_all(&sub).expect("create sub");
+    fs::write(
+        sub.join("Cellfile"),
+        "provision.type = shell\nprovision.script = ./p.sh\nprovision.host_path = ./tools\n",
+    )
+    .expect("write Cellfile");
+    fs::write(sub.join("p.sh"), "#!/bin/sh\nexit 0\n").expect("write p.sh");
+    fs::set_permissions(sub.join("p.sh"), PermissionsExt::from_mode(0o755)).expect("chmod p.sh");
+
+    // cwd is `dir`; the Cellfile is named relative: `sub/Cellfile`.
+    let output = Command::new(hotcell_bin())
+        .current_dir(dir.path())
+        .args([
+            "run",
+            "--dry-run",
+            "--file",
+            "sub/Cellfile",
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .expect("run hotcell");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    let cwd = dir.path().display().to_string();
+
+    // The rootfs bind source is absolute, with the `.` component dropped.
+    let bind_abs = format!("--bind {cwd}/sub/.cell/default/fs /");
+    assert!(stderr.contains(&bind_abs), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("--bind sub/") && !stderr.contains("--bind ./sub"),
+        "relative bind must not leak into the plan: {stderr}"
+    );
+
+    // The relative host_path is absolutized, and its staged target mirrors
+    // the absolute form (no `/hotcell/host./tools` mangling).
+    let host_abs = format!("--ro-bind {cwd}/tools /hotcell/host{cwd}/tools");
+    assert!(stderr.contains(&host_abs), "stderr: {stderr}");
+
+    // The cellfile directory staged for the provisioner is absolute too.
+    let cellfile_abs = format!("--ro-bind {cwd}/sub /hotcell/cellfile");
+    assert!(stderr.contains(&cellfile_abs), "stderr: {stderr}");
 }

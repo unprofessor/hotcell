@@ -171,10 +171,10 @@ fn run_cell(
         cell.is_current(&declaration) && cell.provisioned_script_digest == current_digest;
 
     // Compile the whole run into an execution plan *before* doing anything:
-    // the steps displayed below are the very same `Command` values that will
-    // later be executed. Building the plan has no side effects.
-    let mut plan =
-        crate::plan::build_execution_plan(&cellfile, name, program, args, !already_current)?;
+    // the steps displayed below are the very same arguments that will later
+    // be collapsed into commands and executed. Building the plan has no
+    // side effects.
+    let plan = crate::plan::build_execution_plan(&cellfile, name, program, args, !already_current)?;
 
     // ---- Display the plan ----
     eprintln!("{}", plan.render());
@@ -205,7 +205,7 @@ fn run_cell(
         // cell's rootfs. Mirrors ProvisionSucceeds / ProvisionFails and the
         // ProvisioningLogsToConsole guarantee. The sandbox command comes
         // from the plan (the very command that was displayed).
-        let outcome = provision(&cell, &declaration, &mut plan)?;
+        let outcome = provision(&cell, &declaration, &plan)?;
         let declaration = match outcome {
             ProvisionOutcome::Succeeded(d) => d,
             ProvisionOutcome::Failed(err) => {
@@ -278,13 +278,13 @@ fn run_cell(
     let log_file = state::log_file_path(&cellfile.directory, name);
     eprintln!("session log: {}", log_file.display());
 
-    // Execute the agent step exactly as displayed.
-    plan.agent
-        .command
-        .stdin(Stdio::inherit())
+    // Execute the agent step as displayed: collapse the plan's arguments
+    // into a command and spawn it.
+    let mut cmd = plan.agent.command();
+    cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    let mut child = plan.agent.command.spawn()?;
+    let mut child = cmd.spawn()?;
     let exit_status = child.wait()?;
 
     // The agent has exited; tear down the firewall proxy and the bridge dir

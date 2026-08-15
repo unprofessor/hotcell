@@ -70,7 +70,7 @@ pub trait Provisioner {
         &self,
         ctx: &ProvisionContext,
         declaration: &CellDeclaration,
-        provisioning_step: Option<&mut PlanStep>,
+        provisioning_step: Option<&PlanStep>,
     ) -> ProvisionOutcome;
 }
 
@@ -203,7 +203,7 @@ pub fn provision_control_env(
 pub fn provision(
     cell: &Cell,
     declaration: &CellDeclaration,
-    plan: &mut crate::plan::ExecutionPlan,
+    plan: &crate::plan::ExecutionPlan,
 ) -> anyhow::Result<ProvisionOutcome> {
     let provisioner = select_provisioner(&declaration.provisioner)?;
 
@@ -223,7 +223,7 @@ pub fn provision(
         workdir,
     };
 
-    let outcome = provisioner.provision(&ctx, declaration, plan.provisioning.as_mut());
+    let outcome = provisioner.provision(&ctx, declaration, plan.provisioning.as_ref());
     // Remove the host-path staging skeleton from the rootfs regardless of
     // outcome — bwrap leaves intermediate bind-target dirs behind, and we
     // don't want them (or the host username they'd embed) visible to the
@@ -244,7 +244,7 @@ impl Provisioner for NoneProvisioner {
         &self,
         ctx: &ProvisionContext,
         declaration: &CellDeclaration,
-        _provisioning_step: Option<&mut PlanStep>,
+        _provisioning_step: Option<&PlanStep>,
     ) -> ProvisionOutcome {
         let workdir_path = workdir_host_path(&ctx.cell_root, &ctx.workdir);
         if let Err(e) = std::fs::create_dir_all(&workdir_path) {
@@ -280,7 +280,7 @@ impl Provisioner for ScriptProvisioner {
         &self,
         ctx: &ProvisionContext,
         declaration: &CellDeclaration,
-        provisioning_step: Option<&mut PlanStep>,
+        provisioning_step: Option<&PlanStep>,
     ) -> ProvisionOutcome {
         let Some(step) = provisioning_step else {
             return ProvisionOutcome::Failed(
@@ -289,7 +289,7 @@ impl Provisioner for ScriptProvisioner {
         };
 
         let script_host = ctx.cellfile_directory.join(&self.script);
-        let status = match step.command.status() {
+        let status = match step.command().status() {
             Ok(s) => s,
             Err(e) => {
                 return ProvisionOutcome::Failed(format!(
