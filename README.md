@@ -1,24 +1,10 @@
 # hotcell — an AI coding agent sandbox
 
-**hotcell** isolates AI coding agents (e.g. [Pi](https://pi.dev), Claude Code,
-Copilot) in lightweight, disposable sandboxes. Each agent runs inside a
-[bubblewrap](https://github.com/containers/bubblewrap) container with a
-private filesystem, a clean environment, and an HTTP-allowlist-only network
-egress path — so the agent can talk to its model provider but nothing else.
-
-## Status
-
-| Capability | Status |
-| ----------- | -------- |
-| Filesystem isolation (bubblewrap) | ✅ Stable |
-| Shell / no-op provisioner | ✅ Stable |
-| Cell persistence & state directory | ✅ Stable |
-| HTTP CONNECT allowlist firewall | ✅ Stable |
-| Offline cells (no network) | ✅ Stable |
-| Cellfile override flags (`--file`, `--cell`, `--name`) | ✅ Stable |
-| Policy v2: host globs, CIDRs, warn mode | 🔜 Post-v1 |
-| Rego policy evaluation | 🔜 Gated |
-| TLS MITM / L7 method-path-headers | 🔜 Gated |
+**hotcell** runs AI coding agents (e.g. [Pi](https://pi.dev), Claude Code,
+Copilot) inside [bubblewrap](https://github.com/containers/bubblewrap)
+sandboxes. Each agent gets a private filesystem, an environment containing
+only what its Cellfile declares, and no network route off the machine except
+an HTTP CONNECT proxy that allows the hostnames you list.
 
 ## Install
 
@@ -29,15 +15,23 @@ egress path — so the agent can talk to its model provider but nothing else.
   etc.). Required for sandbox isolation.
 - **Rust** 1.81+ — needed only to build hotcell itself.
 
-### Build from source
+### From git
+
+```bash
+cargo install --git https://github.com/unprofessor/hotcell
+```
+
+This puts `hotcell` in `~/.cargo/bin`.
+
+### From a checkout
+
+To hack on hotcell, clone it and install from there:
 
 ```bash
 git clone https://github.com/unprofessor/hotcell.git
 cd hotcell
 cargo install --path .
 ```
-
-This installs `hotcell` to `~/.cargo/bin/hotcell`.
 
 ## Quick start
 
@@ -74,71 +68,35 @@ directory. Keys use dot-separated namespacing.
 | `workdir` | Working directory inside the cell | `workdir = /work` |
 | `env.*` | Environment variables passed to the agent | `env.PATH = /opt/pi/bin:/usr/bin:/bin` |
 | `net.allow` | Allowed egress endpoints (`host` or `host:port`, repeatable) | `net.allow = generativelanguage.googleapis.com:443` |
-| `seed` | Source → target file mapping (provisioner-interpreted) | `seed = ./config.json => /app/config.json` |
-| `package` | Package to install (provisioner-interpreted) | `package = nodejs` |
+| `seed` | Source → target file mapping. **Parsed but not implemented** — no provisioner reads it | `seed = ./config.json => /app/config.json` |
+| `package` | Package to install. **Parsed but not implemented** — no provisioner reads it | `package = nodejs` |
 
 A completely empty Cellfile is valid — it gives you a no-op provisioner,
 offline, with a working directory at `/work`.
 
 ## Commands
 
-### `hotcell run`
-
-Provision a cell (if needed) and run a program inside it.
-
 ```bash
-hotcell run [--name <name>] [--file <path>] [--cell <dir>] [-y] [--dry-run] -- <program> [args...]
+hotcell run -- pi                 # provision if needed, then run pi in the cell
+hotcell run --dry-run -- pi       # print the plan, run nothing
+hotcell run --name scratch -- sh  # a second cell from the same Cellfile
+hotcell status                    # list cells and their provisioning state
+hotcell destroy                   # tear down a cell's rootfs
 ```
 
-- `--name` — cell name (default: `default`). Multiple cells can share one
-  Cellfile.
-- `--file` — path to an explicit Cellfile (default: `$PWD/Cellfile`).
-- `--cell` — override where cell state lives (independent of the Cellfile
-  location).
-- `-y, --no-confirm` — skip the confirmation prompt (the plan is still
-  displayed).
-- `--dry-run` — print the execution plan and exit without running anything;
-  no state is created or modified.
-- `--` — everything after this is the program and its arguments.
+Everything after `--` is the program and its arguments; without it, hotcell
+parses the program's flags as its own. Run `hotcell --help` or
+`hotcell <command> --help` for the full flag list.
 
 Before any sandbox starts, hotcell prints its **execution plan**: every
-`bwrap` command it will run — one flag (with its values) per line,
-backslash continuations, POSIX quoting, and all host paths shown absolute —
-so the block can be copy-pasted verbatim into a terminal. The commands
-shown are the commands run: execution walks the same plan that was
-displayed. A `[y/N]` confirmation prompt then gates the run unless
-`--dry-run` (prints and exits) or `-y` (runs immediately) is given.
+`bwrap` command it will run, one flag per line, POSIX-quoted with all host
+paths absolute, so the block can be copy-pasted verbatim into a terminal.
+Execution runs that same plan, argument for argument. A `[y/N]` prompt then
+gates the run — `--dry-run` prints the plan and exits, `-y` skips the
+prompt.
 
-**Exit code:** mirrors the program's exit code. If provisioning fails, exits
-with 1.
-
-### `hotcell status`
-
-List cells and their provisioning status:
-
-```bash
-hotcell status [--file <path>] [--cell <dir>]
-```
-
-Shows each cell name and one of `unprovisioned`, `provisioned`,
-`provisioning_failed`.
-
-### `hotcell destroy`
-
-Tear down a cell's provisioned filesystem, returning it to unprovisioned:
-
-```bash
-hotcell destroy [--name <name>] [--file <path>] [--cell <dir>] [--force]
-```
-
-Prompts for confirmation unless `--force` is passed. The Cellfile and state
-directory structure remain — only the sandbox rootfs is removed.
-
-### Global flags
-
-- `-f, --file` — applies to every subcommand; state lives alongside this file.
-- `-c, --cell` — overrides the state root directory.
-- `-V, --version` — print version.
+`hotcell run` exits with the program's exit code, or 1 if provisioning
+failed.
 
 ## Network firewall
 
@@ -150,10 +108,21 @@ plus a host-side HTTP CONNECT proxy:
   loopback address. The agent connects through it, and only the listed
   hostnames are reachable.
 
-The proxy is **hostname-allowlist only** for v1 — port, protocol, URL-path,
-and L7 rules are post-v1. Non-HTTP protocols (raw TCP/UDP) are blocked
-because the cell cannot reach non-loopback addresses through the
-unshared-net namespace.
+### Known limits
+
+The proxy matches the hostname in the agent's `CONNECT` request (and the
+port, when one is declared). Everything else is post-v1:
+
+- **Resolved addresses are not checked.** The proxy dials from the host's
+  network namespace, so an allowlisted name that resolves to a loopback,
+  link-local, or LAN address reaches it. Only allowlist hosts you would be
+  willing to let the agent reach *through* your machine.
+- **No URL-path, method, or header rules**, and no globs or CIDRs — an
+  allowlisted host is allowed in full. TLS is tunneled, not inspected.
+- **A host declared without a port allows every port** on that host.
+
+Non-HTTP protocols (raw TCP/UDP) are blocked because the cell cannot reach
+non-loopback addresses through the unshared-net namespace.
 
 For a self-hosting example that runs Pi inside a hotcell, see
 [examples/pi-bootstrap](examples/pi-bootstrap/).
@@ -167,16 +136,18 @@ For a self-hosting example that runs Pi inside a hotcell, see
 4. It **launches the agent** inside `bwrap --unshare-net` with:
    - The provisioned rootfs mounted as `/`
    - `HOME`, `PATH`, and other env vars set from the Cellfile
-   - `HTTPS_PROXY` pointing at the host-side firewall
-   - A UDS bridge for loopback-like connectivity
+   - A forwarder on the namespace's own loopback, which `HTTP_PROXY` and
+     `HTTPS_PROXY` point at, relaying to the host firewall over a Unix
+     socket — the agent itself never has a route off loopback
 5. When the agent exits, hotcell tears down the firewall and returns the
    agent's exit code.
 
 ## Specification
 
-The formal Allium specification lives in [`hotcell.allium`](hotcell.allium).
-It defines the entity model, state machine, and guarantees — the code
-implements it.
+The Allium specification in [`hotcell.allium`](hotcell.allium) defines the
+entity model, state machine, and guarantees. It is the reference the code is
+written against, and it currently runs ahead of the code in places — sessions
+are not modelled at runtime, and `provisioner_override` is unimplemented.
 
 ## License
 
