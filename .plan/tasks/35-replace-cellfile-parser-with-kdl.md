@@ -260,3 +260,150 @@ survive the migration with the same effect as the v1 file.
     the new `{key, source}` no longer matches. Updating the spec felt outside
     a parser task, but the divergence is real and someone should own it —
     flagging it rather than silently leaving it.
+
+## Review
+
+Reviewed 2026-08-23 by an independent reviewer on branch
+`worktree-agent-acfda6dd6153344c0` (3 commits on `main`). Every check below
+was re-run from scratch; none of the worker's numbers were copied.
+
+### Gates
+
+- `cargo fmt --all -- --check` — clean, exit 0.
+- `RUSTFLAGS="-D warnings" cargo clippy --all-targets --all-features` — exit
+  0, zero warnings. Re-run after `touch src/*.rs tests/*.rs` so it was a real
+  re-check, not a fingerprint hit.
+- `cargo test --all-targets --all-features` — exit 0. 21 unit tests (12 in
+  `cellfile`), 6 + 3 + 5 + 9 + 4 + 1 + 4 + 3 + 2 + 4 + 5 integration = 67
+  total, 0 failed, 0 ignored.
+- The sandbox tests genuinely sandbox. Confirmed independently rather than
+  inferred from timings: `hotcell run -y -- /bin/sh -c 'pwd; echo $GREETING'`
+  on a scratch Cellfile printed `/work` and `hi there` from inside a real
+  `bwrap --unshare-pid --unshare-net --clearenv` invocation. `/usr/bin/bwrap`
+  and `/usr/bin/python3` are both present, so no test short-circuited.
+
+### MSRV
+
+`cargo +1.95.0 build --all-targets` compiled the whole crate and all test
+targets, exit 0. `kdl` resolved to 6.7.1, whose manifest declares
+`rust-version = "1.95"`; `Cargo.toml` now matches. `.github/workflows/ci.yml`
+runs stable + beta only, with no pinned-MSRV job, so no workflow change was
+needed. `miette` 7.6.0 arrives only under `kdl`, and its `fancy` feature is
+off: `cargo tree -e features` shows only `cfg-if` and `unicode-width` under
+it, and `grep -c` for `supports-color`/`owo-colors`/`textwrap`/`terminal_size`
+in `Cargo.lock` returns 0.
+
+### The example Cellfile is faithfully migrated — proven, not eyeballed
+
+Built `main`'s binary from `git archive main` into a scratch tree and diffed
+the full plan for `examples/pi-bootstrap/Cellfile` against this branch's
+binary, with the two source roots normalised:
+
+```
+$ diff -u <main plan> <branch plan>
+IDENTICAL PLANS
+```
+
+Byte-for-byte identical: the same rootfs bind, the same four `--ro-bind`
+host-path stagings (`~/.nvm/versions/node`, `~/.pi`, `~/.agents/skills`,
+`~/.gitconfig`), the same `--chdir`, and the same agent `--setenv PATH`,
+`HOME`, `PI_PROVIDER`. Nothing was gained or lost in the migration.
+
+### IPv6 — the motivating bug is real and is fixed
+
+Verified in both directions. On `main`, `net.allow = 2001:db8::1` persisted as
+
+```
+{'allowed_endpoints': [{'host': '2001:db8:', 'port': 1}]}
+```
+
+— a silently wrong allowlist entry, exactly the `rsplit_once(':')` failure.
+On this branch, `net { allow "2001:db8::1" port=8443; allow "::1" }` persists
+to `provisioned_as.json` as `2001:db8::1`/8443 and `::1`/null, colons intact.
+
+### Fail-closed behaviour — probed directly, beyond the test suite
+
+Every one of these was written as a scratch Cellfile and run through
+`hotcell run --dry-run`. All are errors with `path:line:col`; none silently
+produced a default:
+
+| Input | Result |
+| --- | --- |
+| `nett { allow "h" }` | `Cellfile:2:1: unknown Cellfile node \`nett\`` |
+| `net { deny "h" }` | unknown node inside `net` |
+| `provision "shell" scrpit="..."` | unknown property on `provision` |
+| `host-path "/tmp" ro=#true` | `host-path` takes no `ro=` property |
+| `secret FOO="x"` | `secret` takes no `FOO=` property |
+| `workdir "/work" { foo }` | `workdir` takes no child block |
+| `net "x" { allow "a" }` | `net` takes no arguments |
+| `provision` (no arg) | takes exactly one value, got 0 |
+| `workdir 5`, `env FOO=42`, `env FOO=#true` | must be a string, got `…` |
+| `port=99999` / `port=0` / `port=-1` / `port="443"` | invalid port, located |
+| `env FOO="a" BAR` | "…not both", at `:1:1:` |
+| `env` alone / `env ""` | needs a variable / not a usable name |
+| `package "node"` / `seed "./a"` | "is not implemented — it was removed…" |
+| a full v1 `key = value` file | KDL diagnostics **plus** the migration hint naming line 1 |
+
+The migration hint also fires on a v1 file containing only `net.allow = …`,
+only `env.PATH = …`, only `workdir = …`, or a leading `#` comment. Exit code
+is 1 in every failing case, and no `.cell` state is created.
+
+### Non-literal env vars (flagged item 1)
+
+The error path is correct and correctly ordered. `build_execution_plan` maps
+`environment` and `?`-returns on `Passthrough`/`Secret` at plan.rs:~218,
+*before* `provision_control_env` is called at plan.rs:240 — so a
+`secret HOME` can never silently fall through to the `/home/agent` default in
+`provision_control_env`. Verified end to end: `secret HOME` and
+`env PI_PROVIDER` each fail with a named, actionable message, exit 1, and
+leave no `.cell` directory behind. `cli.rs:179` is the only caller of the plan
+builder, so there is no bypass.
+
+### Test coverage is behavioural, not ceremonial
+
+The 12 cellfile unit tests assert parsed values *by value* (`parses_all_nodes`
+compares the whole `environment` vector, `ipv6_endpoints_keep_their_colons`
+compares the whole endpoint vector), assert error substrings *together with*
+the `:line:col` they must carry (`:1:1:`, `:2:18:`), and
+`provision_none_and_empty_document_agree` asserts two declarations are
+*equal* rather than spot-checking. The 5 new integration tests go through the
+real binary and check stderr plus exit status. All five behaviours the old
+unit tests covered are preserved or superseded (v1 `#` comment stripping is
+replaced by KDL `//`, exercised in `parses_all_nodes`). These would catch a
+regression.
+
+### Non-blocking findings — for follow-up, not for this task
+
+1. `src/provisioning.rs:273` still says "declared at `provision.script`" in a
+   doc comment. The same sweep updated `cell.rs` and `isolation.rs`; this one
+   was missed. Cosmetic.
+2. Duplicate single-valued nodes silently last-win. Two `workdir` nodes yield
+   the second; two `provision` nodes yield the second and *silently discard
+   the first's `host-path` children*; a duplicated `script=` on one node
+   likewise. This matches the v1 parser's last-wins semantics exactly, so it
+   is not a regression and is out of scope here — but for a grammar whose
+   selling point is failing closed, rejecting a repeated single-valued node
+   would be strictly better. Worth a ticket.
+3. `env FOO="a" BAR="b"` (two properties, no argument) falls into the
+   "…either a literal or a bare NAME, not both" arm, so the message misstates
+   what is wrong. Still an error, so fail-closed holds.
+4. KDL type annotations are silently ignored: `(ty)workdir "/work"` parses as
+   `workdir`. Harmless today; would matter if annotations ever carry meaning.
+5. The v1 migration hint prints *after* up to a dozen raw KDL diagnostics.
+   Leading with the hint would read better for the team's own files.
+6. Flagged item 3 confirmed: `hotcell.allium` still declares
+   `EnvVar { key, value }` and references `env.HOME` / `provision.host_path`.
+   Real divergence, separately ticketed, not grounds for changes here.
+7. Flagged items 2 (`packages`/`files` retained, always empty), 4 (`env "NAME"`
+   ≡ `env NAME`) and 5 (README) were checked and judged acceptable: the fields
+   are documented as inert and pointed at `packages-seeds-semantics`, KDL v2
+   cannot distinguish a bare identifier from a quoted string without
+   inspecting source formatting, and the README belongs to
+   `document-kdl-cellfile-format`. `find`/`grep` confirm the README is the only
+   remaining v1-format documentation in the tree.
+
+### Acceptance
+
+All 11 boxes verified independently. Nothing was left unverified.
+
+verdict: approved
