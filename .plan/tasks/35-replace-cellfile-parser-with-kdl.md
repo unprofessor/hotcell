@@ -4,8 +4,8 @@ aliases: [replace-cellfile-parser-with-kdl]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Replace the Cellfile parser with KDL v2
-status: todo
-assignee: null
+status: in_progress
+assignee: worker-1
 created: 2026-08-23
 updated: 2026-08-23
 tags: [cellfile, grammar, parser]
