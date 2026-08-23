@@ -7,7 +7,7 @@ title: Extend network policy types, Cellfile parsing, and persistence
 status: todo
 assignee: null
 created: 2026-08-08
-updated: 2026-08-08
+updated: 2026-08-23
 tags: [firewall, cellfile, serde, phase-1]
 depends_on: [document-policy-precedence-and-safety]
 ---
@@ -47,3 +47,12 @@ CIDR-only policies as effective egress policies.
 ## Notes
 
 - 2026-08-08 created. Do not implement proxy matching or DNS resolution here.
+- 2026-08-23 **premise at risk.** This task assumes additive `net.allow =
+  host[:port]` Cellfile keys and back-compat for existing declarations.
+  `cellfile-kdl-grammar-and-secrets` replaces the format with KDL and splits
+  endpoints into `allow "host" port=443`, retiring the `rsplit_once(':')`
+  parsing this task's acceptance criteria refer to — including the IPv6
+  requirement, which that story fixes first. If the grammar lands first, the
+  acceptance criteria here need rewriting against KDL. The leader should
+  sequence the two deliberately rather than letting a worker discover the
+  conflict.

@@ -5,7 +5,7 @@ title: Ship v1 self-hostable hotcell
 status: todo
 assignee: null
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-08-23
 tags: []
 ---
 
@@ -24,6 +24,10 @@ non-empty `net.allow` policy.
 - Network firewall (HTTP allowlist proxy) — story `network-firewall`.
 - Polish and docs — story `polish-and-docs`.
 - Decide packages/seeds semantics — story `packages-seeds-semantics`.
+- KDL Cellfile grammar with env passthrough and secrets — story
+  `cellfile-kdl-grammar-and-secrets`.
+- Env changes should not force re-provisioning — story
+  `env-changes-should-not-reprovision`.
 
 ## Out of scope
 

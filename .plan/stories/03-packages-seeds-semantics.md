@@ -6,7 +6,7 @@ title: Decide packages/seeds semantics
 status: todo
 assignee: null
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-08-23
 tags: []
 ---
 
@@ -31,3 +31,8 @@ content the provisioner interprets. Decide and document the v1 contract:
 - 2026-07-29 created. Not a self-hosting blocker; deferred from the firewall
   story. No task yet — the tech lead should split this after the firewall
   lands.
+- 2026-08-23 scope narrowed by `cellfile-kdl-grammar-and-secrets`, which
+  **removes `package` and `seed` from the Cellfile grammar** rather than
+  porting inert keys to KDL. Using either now errors. This story therefore no
+  longer decides "what do the existing keys mean"; it decides whether the
+  capability comes back at all, and if so what its KDL grammar is.
