@@ -22,7 +22,7 @@
 //!
 //! ## Host-path staging
 //!
-//! Host paths (the Cellfile directory and `provision.host_path` entries) are
+//! Host paths (the Cellfile directory and `host-path` entries) are
 //! bind-mounted under a neutral staging prefix ([`HOST_STAGING_DIR`], `/hotcell`)
 //! rather than at their original absolute host paths. This is critical: bwrap
 //! creates intermediate directories in the rootfs for bind targets whose paths

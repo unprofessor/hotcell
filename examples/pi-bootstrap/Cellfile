@@ -1,73 +1,79 @@
-# Example: bootstrap a Pi Agent (https://pi.dev) inside a hotcell.
-#
-# This Cellfile declares the shell provisioner and the environment Pi needs
-# inside the sandbox. The provision script (provision.sh) installs Pi's *own*
-# copy of node and the pi binary into the cell rootfs — nothing is shared from
-# the host except the read-only base system.
-#
-# The provisioner runs INSIDE the cell sandbox (rootfs as "/"), with read-only
-# access to the host paths listed via `provision.host_path` so it can copy
-# tools in. The agent later runs with NO host-path access — only the
-# provisioned rootfs. This is the permissions model: provisioner may
-# bootstrap, agent may not.
-#
-# Usage, from this directory:
-#   hotcell run -- pi
-#
-# Provide an API key for your provider via the env, e.g. copy this file to
-# `Cellfile` and edit, or set the key in the env.* lines below.
+// Example: bootstrap a Pi Agent (https://pi.dev) inside a hotcell.
+//
+// Cellfiles are KDL v2 documents (https://kdl.dev). Comments are `//`.
+//
+// This Cellfile declares the shell provisioner and the environment Pi needs
+// inside the sandbox. The provision script (provision.sh) installs Pi's *own*
+// copy of node and the pi binary into the cell rootfs — nothing is shared from
+// the host except the read-only base system.
+//
+// The provisioner runs INSIDE the cell sandbox (rootfs as "/"), with read-only
+// access to the host paths listed as `host-path` children so it can copy
+// tools in. The agent later runs with NO host-path access — only the
+// provisioned rootfs. This is the permissions model: provisioner may
+// bootstrap, agent may not.
+//
+// Usage, from this directory:
+//   hotcell run -- pi
+//
+// Provide an API key for your provider via the env, e.g. copy this file to
+// `Cellfile` and edit, or set the key in the `env` lines below.
 
-provision.type = shell
-provision.script = ./provision.sh
-workdir = /work
+workdir "/work"
 
-# Host paths the provisioner may read (read-only) to bootstrap from. The agent
-# never sees these. We grant access to the nvm node tree so the provisioner
-# can copy node + npm into the cell, plus the developer's Pi config/skills to
-# seed the agent home.
-provision.host_path = ~/.nvm/versions/node
-provision.host_path = ~/.pi
-provision.host_path = ~/.agents/skills
-provision.host_path = ~/.gitconfig
+// Host paths the provisioner may read (read-only) to bootstrap from. The agent
+// never sees these. We grant access to the nvm node tree so the provisioner
+// can copy node + npm into the cell, plus the developer's Pi config/skills to
+// seed the agent home.
+provision "shell" script="./provision.sh" {
+    host-path "~/.nvm/versions/node"
+    host-path "~/.pi"
+    host-path "~/.agents/skills"
+    host-path "~/.gitconfig"
+}
 
-# Pi's runtime environment inside the sandbox.
-# PATH points at the provisioned pi + node first, then the base system.
-env.PATH = /opt/pi/bin:/opt/node/bin:/usr/bin:/bin
-env.HOME = /home/agent
+// Pi's runtime environment inside the sandbox.
+// PATH points at the provisioned pi + node first, then the base system.
+env PATH="/opt/pi/bin:/opt/node/bin:/usr/bin:/bin"
+env HOME="/home/agent"
 
-# Pick a provider and supply its API key. Pi defaults to google (Gemini).
-# The API key MUST be set here (env.*) — the agent runs with a clean
-# environment (only env.* declared in the Cellfile are passed through), so a
-# key exported in your shell does NOT reach the agent. Set ONE provider:
-env.PI_PROVIDER = google
-# env.GOOGLE_API_KEY = ...        # Gemini
-# env.PI_PROVIDER = anthropic
-# env.ANTHROPIC_API_KEY = ...     # Claude
-# env.PI_PROVIDER = openai
-# env.OPENAI_API_KEY = ...        # GPT
+// Pick a provider and supply its API key. Pi defaults to google (Gemini).
+// The API key MUST be declared here — the agent runs with a clean
+// environment (only what this Cellfile declares is passed through), so a
+// key exported in your shell does NOT reach the agent by itself. Set ONE
+// provider:
+env PI_PROVIDER="google"
+// env GOOGLE_API_KEY="..."      // Gemini
+// env PI_PROVIDER="anthropic"
+// env ANTHROPIC_API_KEY="..."   // Claude
+// env PI_PROVIDER="openai"
+// env OPENAI_API_KEY="..."      // GPT
 
-# Allow egress to the model provider(s) you use. The network firewall IS
-# implemented: the cell's agent runs in an unshared-net namespace (loopback
-# only) with an HTTP CONNECT allowlist proxy as its only egress path. List
-# only the provider host(s) you actually use; everything else is blocked.
-# Uncomment the line(s) matching your chosen provider above.
-net.allow = generativelanguage.googleapis.com:443   # Gemini (google)
-# net.allow = api.anthropic.com:443                  # Claude (anthropic)
-# net.allow = api.openai.com:443                     # GPT (openai)
+// Allow egress to the model provider(s) you use. The network firewall IS
+// implemented: the cell's agent runs in an unshared-net namespace (loopback
+// only) with an HTTP CONNECT allowlist proxy as its only egress path. List
+// only the provider host(s) you actually use; everything else is blocked.
+// Uncomment the line(s) matching your chosen provider above.
+net {
+    allow "generativelanguage.googleapis.com" port=443   // Gemini (google)
+    // allow "api.anthropic.com" port=443                // Claude (anthropic)
+    // allow "api.openai.com" port=443                   // GPT (openai)
+}
 
-# IMPORTANT — provider config precedence (verified end-to-end):
-# provision.sh seeds ~/.pi from the host (see provision.sh). If your host
-# ~/.pi sets a provider/model (e.g. an internal proxy), that seeded config
-# OVERRIDES env.PI_PROVIDER / PI_MODEL here, and pi will target the seeded
-# provider's endpoint — which is likely NOT in `net.allow` above, so the
-# agent gets "Connection error." To force the provider declared here either:
-#   (a) remove the ~/.pi seeding block in provision.sh for a hermetic cell,
-#       OR
-#   (b) pass the provider/model/key explicitly on `hotcell run -- pi`, e.g.:
-#         hotcell run -- pi -p "..." --provider google --model gemini-2.5-flash \
-#           --api-key "$GOOGLE_API_KEY"
-# Verified (without a real key): pi -> HTTPS_PROXY -> firewall proxy ->
-# CONNECT 200 -> TLS -> generativelanguage.googleapis.com returned Google's
-# real "API key not valid" (400 API_KEY_INVALID) response, proving the
-# firewall egress path works end-to-end. A real key is all that's needed for
-# a 200 model response.
+// IMPORTANT — provider config precedence (verified end-to-end):
+// provision.sh seeds ~/.pi from the host (see provision.sh). If your host
+// ~/.pi sets a provider/model (e.g. an internal proxy), that seeded config
+// OVERRIDES the PI_PROVIDER / PI_MODEL declared here, and pi will target the
+// seeded provider's endpoint — which is likely NOT in the `net` allowlist
+// above, so the agent gets "Connection error." To force the provider declared
+// here either:
+//   (a) remove the ~/.pi seeding block in provision.sh for a hermetic cell,
+//       OR
+//   (b) pass the provider/model/key explicitly on `hotcell run -- pi`, e.g.:
+//         hotcell run -- pi -p "..." --provider google --model gemini-2.5-flash \
+//           --api-key "$GOOGLE_API_KEY"
+// Verified (without a real key): pi -> HTTPS_PROXY -> firewall proxy ->
+// CONNECT 200 -> TLS -> generativelanguage.googleapis.com returned Google's
+// real "API key not valid" (400 API_KEY_INVALID) response, proving the
+// firewall egress path works end-to-end. A real key is all that's needed for
+// a 200 model response.

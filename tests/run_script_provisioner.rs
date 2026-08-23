@@ -31,7 +31,7 @@ fn run(dir: &std::path::Path, program: &str) -> (std::process::Output, String, S
 fn write_shell_cellfile(dir: &std::path::Path) {
     fs::write(
         dir.join("Cellfile"),
-        "provision.type = shell\nprovision.script = ./provision.sh\nworkdir = /work\n",
+        "provision \"shell\" script=\"./provision.sh\"\nworkdir \"/work\"\n",
     )
     .expect("write Cellfile");
     fs::write(
@@ -56,7 +56,7 @@ fn script_provisioner_installs_tool_visible_in_sandbox() {
     // A Cellfile that selects the shell provisioner.
     fs::write(
         dir.path().join("Cellfile"),
-        "provision.type = shell\nprovision.script = ./provision.sh\nworkdir = /work\n",
+        "provision \"shell\" script=\"./provision.sh\"\nworkdir \"/work\"\n",
     )
     .expect("write Cellfile");
 
@@ -170,7 +170,7 @@ fn script_provisioner_failure_fails_provisioning() {
 
     fs::write(
         dir.path().join("Cellfile"),
-        "provision.type = shell\nprovision.script = ./provision.sh\n",
+        "provision \"shell\" script=\"./provision.sh\"\n",
     )
     .expect("write Cellfile");
 
@@ -221,7 +221,7 @@ fn cell_override_with_shell_provisioner() {
 
     fs::write(
         dir.path().join("Cellfile"),
-        "provision.type = shell\nprovision.script = ./provision.sh\nworkdir = /work\n",
+        "provision \"shell\" script=\"./provision.sh\"\nworkdir \"/work\"\n",
     )
     .expect("write Cellfile");
     fs::write(
@@ -269,14 +269,14 @@ fn cell_override_with_shell_provisioner() {
     );
 }
 
-/// Selects the shell provisioner but omits provision.script; a hard config
+/// Selects the shell provisioner but omits its `script=` property; a hard config
 /// error, not a provisioning failure.
 #[test]
 fn script_provisioner_without_script_path_is_config_error() {
     let dir = TempDir::new().expect("create temp dir");
 
-    // Selects the shell provisioner but omits provision.script.
-    fs::write(dir.path().join("Cellfile"), "provision.type = shell\n").expect("write Cellfile");
+    // Selects the shell provisioner but omits its `script=` property.
+    fs::write(dir.path().join("Cellfile"), "provision \"shell\"\n").expect("write Cellfile");
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
@@ -292,7 +292,7 @@ fn script_provisioner_without_script_path_is_config_error() {
         output.status.code()
     );
     assert!(
-        stderr.contains("provision.script"),
+        stderr.contains("requires a `script="),
         "expected a clear error about the missing script path: {stderr}"
     );
 }

@@ -19,10 +19,10 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use shlex::try_quote;
 
-use crate::cellfile::Cellfile;
+use crate::cellfile::{Cellfile, EnvSource};
 use crate::isolation::{self, AgentBridge, Argument, BRIDGE_DIR};
 use crate::state;
 
@@ -192,11 +192,30 @@ pub fn build_execution_plan(
     } else {
         declaration.workdir.as_str()
     };
+    // Only literal values can be plumbed through today. Resolving a
+    // passthrough or a secret against the host environment is
+    // `resolve-env-passthrough-and-secrets`; until it lands, a Cellfile that
+    // declares one fails loudly here rather than handing the agent a cell
+    // that is silently missing the variable it was promised.
     let env: Vec<(String, String)> = declaration
         .environment
         .iter()
-        .map(|v| (v.key.clone(), v.value.clone()))
-        .collect();
+        .map(|v| match &v.source {
+            EnvSource::Literal(value) => Ok((v.key.clone(), value.clone())),
+            EnvSource::Passthrough => Err(anyhow!(
+                "env `{}`: passthrough from the host environment is not yet implemented \
+                 — declare it as `env {}=\"value\"` for now",
+                v.key,
+                v.key
+            )),
+            EnvSource::Secret => Err(anyhow!(
+                "secret `{}`: secrets are not yet implemented — declare it as \
+                 `env {}=\"value\"` for now",
+                v.key,
+                v.key
+            )),
+        })
+        .collect::<Result<_>>()?;
 
     // Only the `shell` provisioner has a bwrap step: it runs inside the
     // sandbox. The `none` provisioner works host-side (a plain mkdir) and

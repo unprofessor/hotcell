@@ -18,7 +18,7 @@ fn destroy_honors_cell_flag() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
 
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     // Provision a cell with state rooted in cell_dir.
     let run = Command::new(hotcell_bin())
@@ -71,7 +71,7 @@ fn status_honors_cell_flag() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
 
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     // Provision a cell with state in cell_dir, plus a second named cell.
     Command::new(hotcell_bin())
@@ -141,7 +141,7 @@ fn status_honors_file_flag() {
     let elsewhere = tempfile::tempdir().unwrap();
 
     // No Cellfile in cwd; the only one is in elsewhere.
-    fs::write(elsewhere.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(elsewhere.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     // status --file should succeed (it reads the Cellfile from elsewhere)
     // and report no cells, since none have been provisioned there.
@@ -182,7 +182,7 @@ fn destroy_cell_flag_missing_cell_errors() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
 
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     let output = Command::new(hotcell_bin())
         .current_dir(cwd.path())
