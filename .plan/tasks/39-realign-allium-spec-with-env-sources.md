@@ -38,9 +38,11 @@ KDL itself is correctly invisible to it — but `EnvVar` is a spec value type,
 and the distinction between a declared literal and a host-resolved secret is
 behaviour, not syntax. It belongs in the spec.
 
-Surfaced by the reviewer of `replace-cellfile-parser-with-kdl`, which
-correctly judged a spec edit out of scope for a parser task. The gap is a
-planning omission in this story, which shipped four tasks and no spec work.
+Surfaced by the **worker** on `replace-cellfile-parser-with-kdl`, which
+judged a spec edit out of scope for a parser task and flagged the divergence
+rather than hiding it; the reviewer independently confirmed it is real. The
+gap is a planning omission in this story, which shipped four tasks and no
+spec work.
 
 Deferred to last on purpose: `resolve-env-passthrough-and-secrets` and
 `redact-secrets-in-execution-plan` both change observable behaviour the spec
