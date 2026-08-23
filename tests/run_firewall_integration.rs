@@ -19,7 +19,7 @@
 //!   non-loopback block tested in `run_loopback_network.rs`.
 //!
 //! Two echo servers are stood up on the host loopback on OS-assigned ports;
-//! only one port is added to `net.allow`. The agent reads `HTTP_PROXY`
+//! only one port is added to the `net` allowlist. The agent reads `HTTP_PROXY`
 //! (set by the in-namespace forwarder to its own loopback address) and issues
 //! raw `CONNECT` requests through it for both ports, asserting `200`+echo for
 //! the allowed one and `403` for the denied one.
@@ -58,17 +58,15 @@ fn skip_if_no_python3() -> bool {
 }
 
 /// Write a Cellfile + a trivial provisioner that creates the workdir, in the
-/// given temp dir. `net_allow_lines` is appended verbatim (one or more
-/// `net.allow = ...` lines).
+/// given temp dir. `net_allow_lines` becomes the body of the `net` block —
+/// one or more `allow "host" port=N` lines.
 fn write_cellfile(dir: &TempDir, net_allow_lines: &str) {
     let mut content = String::from(
-        "provision.type = shell\n\
-         provision.script = ./provision.sh\n\
-         workdir = /work\n",
+        "provision \"shell\" script=\"./provision.sh\"\n\
+         workdir \"/work\"\n",
     );
     if !net_allow_lines.is_empty() {
-        content.push_str(net_allow_lines);
-        content.push('\n');
+        content.push_str(&format!("net {{\n    {net_allow_lines}\n}}\n"));
     }
     fs::write(dir.path().join("Cellfile"), content).unwrap();
     fs::write(
@@ -152,7 +150,7 @@ fn allowlisted_reachable_and_non_allowlisted_blocked() {
     let dir = TempDir::new().expect("create temp dir");
     // Allowlist only the allowed port on 127.0.0.1. The firewall matches host
     // strings, so use "127.0.0.1" (the host the CONNECT targets).
-    write_cellfile(&dir, &format!("net.allow = 127.0.0.1:{allowed_port}"));
+    write_cellfile(&dir, &format!("allow \"127.0.0.1\" port={allowed_port}"));
 
     // The agent reads HTTP_PROXY (set by the in-namespace forwarder to its own
     // loopback address), issues CONNECT to each echo endpoint through it, and

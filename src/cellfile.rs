@@ -5,32 +5,50 @@
 //! specification. The Cellfile is read fresh on every access — the
 //! declaration always reflects the current file on disk.
 //!
-//! On-disk format (v1): a minimal line-based, dotted-key text format. Blank
-//! lines are ignored. A `#` begins a comment at the start of a line or when
-//! preceded by whitespace: everything from the `#` to end-of-line is
-//! ignored, so trailing comments may follow any `key = value` line. A `#`
-//! not preceded by whitespace is literal — `env.KEY = abc#def` keeps its
-//! `#`. Keys are dotted identifiers; the recognised keys are:
+//! On-disk format: a [KDL v2](https://kdl.dev) document. Comments are KDL's
+//! (`// line` and `/* block */`), not `#` — a `#` starts a KDL keyword and is
+//! a syntax error where a comment used to be. The recognised nodes are:
 //!
-//! ```text
-//! provision.type = shell            # provisioner kind (default: "none")
-//! provision.script = ./provision.sh # script path, relative to the Cellfile
-//! provision.host_path = ~/.nvm      # repeatable: host path the provisioner
-//!                                  # may read (read-only) for bootstrapping
-//! workdir = /work                   # in-sandbox working directory
-//! package = node                    # repeatable: a package to install
-//! package = curl
-//! env.KEY = value                   # repeatable: an environment variable
-//! net.allow = host:443              # repeatable: an allowed endpoint
-//! net.allow = host                  #   (port optional)
-//! seed = source => target           # repeatable: a file mapping
+//! ```kdl
+//! workdir "/work"                   // in-sandbox working directory
+//!
+//! provision "shell" script="./provision.sh" {
+//!     host-path "~/.nvm/versions/node"   // repeatable: a host path the
+//!     host-path "~/.gitconfig"           // provisioner may read read-only
+//! }
+//!
+//! env PATH="/opt/pi/bin:/usr/bin"   // literal value, written in the file
+//! env PI_PROVIDER                   // passthrough: taken from the host env
+//! secret ANTHROPIC_API_KEY          // passthrough, redacted in the plan
+//!
+//! net {
+//!     allow "api.anthropic.com" port=443   // repeatable: an allowed endpoint
+//!     allow "example.com"                  // port optional: any port
+//! }
 //! ```
 //!
-//! The format is intentionally minimal. It is an implementation detail
-//! (excluded from the spec) and may evolve.
+//! The two `env` shapes are told apart by KDL's own args-versus-props
+//! distinction, with no extra syntax rule: `env NAME="value"` is a node with
+//! one *property* and no arguments, while `env NAME` is a node with one bare
+//! *argument* and no properties. A node carrying both is an error rather than
+//! a guess. Only the key of a passthrough or secret is ever recorded here —
+//! resolving its value against the host environment happens elsewhere, so a
+//! secret never enters the declaration and therefore never reaches the
+//! execution plan or `provisioned_as.json`.
+//!
+//! Unknown nodes are errors: the format fails closed, so a typo in a
+//! security-relevant directive (`nett { allow ... }`) cannot be silently
+//! ignored. `package` and `seed` from the v1 line format are deliberately
+//! *not* in this grammar — no provisioner ever acted on them — and naming
+//! either yields an error saying so.
+//!
+//! The format is an implementation detail (excluded from the spec) and may
+//! evolve.
 
+use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
+use kdl::{KdlDocument, KdlEntry, KdlError, KdlNode};
 use serde::{Deserialize, Serialize};
 
 /// `Endpoint` value type: a host and optional port.
@@ -48,17 +66,40 @@ pub struct NetworkPolicy {
 }
 
 /// `FileMapping` value type: a host source path seeded into the sandbox.
+///
+/// The grammar has no syntax for these yet — the v1 `seed` key was dropped
+/// rather than ported, because no provisioner read it. The type stays because
+/// the specification still carries it; whether the capability returns, and in
+/// what shape, is `packages-seeds-semantics`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMapping {
     pub source: String,
     pub target: String,
 }
 
-/// `EnvVar` value type.
+/// Where an environment variable's value comes from.
+///
+/// The declaration records the *source*, never a resolved value: a
+/// `Passthrough` or `Secret` var contributes only its key here, so a secret
+/// cannot leak into the execution plan, into `provisioned_as.json`, or into
+/// the declaration comparison that decides whether a cell needs
+/// re-provisioning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnvSource {
+    /// `env NAME="value"` — the value is written in the Cellfile.
+    Literal(String),
+    /// `env NAME` — take the value from the host environment at run time.
+    Passthrough,
+    /// `secret NAME` — passthrough, and redacted wherever the run is
+    /// displayed.
+    Secret,
+}
+
+/// `EnvVar` value type: a key plus where its value comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvVar {
     pub key: String,
-    pub value: String,
+    pub source: EnvSource,
 }
 
 /// `Provisioner` value type: declares which provisioner brings the cell's
@@ -98,15 +139,15 @@ pub struct CellDeclaration {
 /// `{file_directory}/Cellfile`.
 ///
 /// The two directories serve different roles: [`Cellfile::file_directory`]
-/// is where the declaration file actually lives — the base for resolving
-/// `provision.script`, seeds, and relative `provision.host_path` entries —
-/// while [`Cellfile::directory`] is the root for cell state (`.cell/...`).
+/// is where the declaration file actually lives — the base for resolving the
+/// `provision` script and relative `host-path` entries — while
+/// [`Cellfile::directory`] is the root for cell state (`.cell/...`).
 /// They start equal, but `--cell` overrides only the state root, so a cell
 /// can be run from a Cellfile in one place with its state kept in another.
 #[derive(Debug, Clone)]
 pub struct Cellfile {
     /// Directory of the Cellfile itself. Relative paths in the declaration
-    /// (`provision.script`, seeds, host paths) resolve against this.
+    /// (the provision script, host paths) resolve against this.
     pub file_directory: PathBuf,
     /// Root for cell state (`.cell/...`). Equals `file_directory` unless
     /// `--cell` overrides it.
@@ -145,103 +186,450 @@ impl Cellfile {
 }
 
 /// Parse Cellfile text into a `CellDeclaration`.
+///
+/// Every recognised node is handled explicitly and anything else is an
+/// error, so the parser fails closed. An empty document is valid and yields
+/// the defaults: the no-op provisioner, no declared env, and an empty
+/// allowlist (offline). The effective workdir default (`/work`) is applied
+/// by the plan builder, which owns the run's defaults.
 fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
-    let mut decl = CellDeclaration::default();
-    for (i, raw) in text.lines().enumerate() {
-        let line_no = i + 1;
-        let line = strip_comment(raw.trim());
-        if line.is_empty() {
-            continue;
-        }
-        let (key, value) = split_kv(line, line_no, path)?;
-        let key = key.trim();
-        let value = value.trim();
+    let document: KdlDocument = text
+        .parse()
+        .map_err(|error: KdlError| syntax_error(&error, text, path))?;
 
-        if key == "provision.type" {
-            decl.provisioner.kind = value.to_string();
-        } else if key == "provision.script" {
-            decl.provisioner.script = Some(value.to_string());
-        } else if key == "provision.host_path" {
-            decl.provisioner.host_paths.push(value.to_string());
-        } else if key == "workdir" {
-            decl.workdir = value.to_string();
-        } else if key == "package" {
-            decl.packages.push(value.to_string());
-        } else if let Some(env_key) = key.strip_prefix("env.") {
-            decl.environment.push(EnvVar {
-                key: env_key.to_string(),
-                value: value.to_string(),
-            });
-        } else if key == "net.allow" {
-            decl.network
-                .allowed_endpoints
-                .push(parse_endpoint(value, line_no, path)?);
-        } else if key == "seed" {
-            decl.files.push(parse_file_mapping(value, line_no, path)?);
-        } else {
-            anyhow::bail!(
-                "{}:{}: unknown Cellfile key `{key}`",
-                path.display(),
-                line_no
-            );
+    let mut decl = CellDeclaration::default();
+    for node in document.nodes() {
+        match node.name().value() {
+            "workdir" => {
+                reject_children(node, text, path)?;
+                reject_properties(node, text, path)?;
+                decl.workdir = only_string_argument(node, "workdir", text, path)?;
+            }
+            "provision" => decl.provisioner = parse_provision(node, text, path)?,
+            "env" => decl.environment.push(parse_env(node, text, path)?),
+            "secret" => {
+                reject_children(node, text, path)?;
+                reject_properties(node, text, path)?;
+                let key = only_string_argument(node, "secret", text, path)?;
+                decl.environment.push(EnvVar {
+                    key: env_key(&key, node, text, path)?,
+                    source: EnvSource::Secret,
+                });
+            }
+            "net" => parse_net(node, &mut decl.network, text, path)?,
+            // Dropped from the grammar rather than ported: they parsed in the
+            // v1 line format but no provisioner ever acted on them. Named
+            // explicitly so the error says "gone", not "unknown".
+            dropped @ ("package" | "seed") => {
+                return Err(error_at(
+                    path,
+                    text,
+                    node,
+                    format!(
+                        "`{dropped}` is not implemented — it was removed from the Cellfile \
+                         grammar because no provisioner acted on it; have the provision \
+                         script do this work instead"
+                    ),
+                ))
+            }
+            unknown => {
+                return Err(error_at(
+                    path,
+                    text,
+                    node,
+                    format!("unknown Cellfile node `{unknown}`"),
+                ))
+            }
         }
     }
     Ok(decl)
 }
 
-/// Strip a trailing `#` comment from a line. A `#` begins a comment only
-/// at the start of the line or when preceded by whitespace, so values like
-/// `abc#def` keep their `#`.
-fn strip_comment(line: &str) -> &str {
-    let mut prev_ws = true;
-    for (i, c) in line.char_indices() {
-        if c == '#' && prev_ws {
-            return line[..i].trim_end();
+/// Parse `provision "kind" script="..." { host-path "..." }`.
+fn parse_provision(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<Provisioner> {
+    let kind = only_string_argument(node, "provision", text, path)?;
+    let mut provisioner = Provisioner {
+        kind,
+        script: None,
+        host_paths: Vec::new(),
+    };
+
+    for entry in properties(node) {
+        let name = property_name(entry);
+        match name {
+            "script" => provisioner.script = Some(string_value(entry, "script", text, path)?),
+            other => {
+                return Err(error_at(
+                    path,
+                    text,
+                    entry,
+                    format!("unknown property `{other}` on `provision`"),
+                ))
+            }
         }
-        prev_ws = c.is_whitespace();
     }
-    line
+
+    if let Some(children) = node.children() {
+        for child in children.nodes() {
+            match child.name().value() {
+                "host-path" => {
+                    reject_children(child, text, path)?;
+                    reject_properties(child, text, path)?;
+                    provisioner.host_paths.push(only_string_argument(
+                        child,
+                        "host-path",
+                        text,
+                        path,
+                    )?);
+                }
+                unknown => {
+                    return Err(error_at(
+                        path,
+                        text,
+                        child,
+                        format!("unknown node `{unknown}` inside `provision`"),
+                    ))
+                }
+            }
+        }
+    }
+    Ok(provisioner)
 }
 
-/// Split a line into `(key, value)` on the first `=`.
-fn split_kv(raw: &str, line_no: usize, path: &Path) -> anyhow::Result<(String, String)> {
-    let Some(eq) = raw.find('=') else {
-        anyhow::bail!("{}:{}: expected `key = value`", path.display(), line_no);
-    };
-    Ok((raw[..eq].to_string(), raw[eq + 1..].to_string()))
-}
+/// Parse `env NAME="value"` (a literal) or `env NAME` (a passthrough).
+///
+/// The two shapes are distinguished by KDL's own args-versus-props split:
+/// a literal is one property and no arguments, a passthrough is one argument
+/// and no properties. A node carrying both is ambiguous and rejected rather
+/// than guessed at.
+fn parse_env(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<EnvVar> {
+    reject_children(node, text, path)?;
+    let arguments = arguments(node);
+    let properties = properties(node);
 
-/// Parse `host` or `host:port` into an `Endpoint`.
-fn parse_endpoint(s: &str, line_no: usize, path: &Path) -> anyhow::Result<Endpoint> {
-    if let Some((host, port)) = s.rsplit_once(':') {
-        let port: u16 = port.parse().map_err(|_| {
-            anyhow::anyhow!("{}:{}: invalid port in `{s}`", path.display(), line_no)
-        })?;
-        Ok(Endpoint {
-            host: host.to_string(),
-            port: Some(port),
-        })
-    } else {
-        Ok(Endpoint {
-            host: s.to_string(),
-            port: None,
-        })
+    match (arguments.as_slice(), properties.as_slice()) {
+        ([], [property]) => Ok(EnvVar {
+            key: env_key(property_name(property), node, text, path)?,
+            source: EnvSource::Literal(string_value(property, "env value", text, path)?),
+        }),
+        ([argument], []) => {
+            let key = string_value(argument, "env name", text, path)?;
+            Ok(EnvVar {
+                key: env_key(&key, node, text, path)?,
+                source: EnvSource::Passthrough,
+            })
+        }
+        ([], []) => Err(error_at(
+            path,
+            text,
+            node,
+            "`env` needs a variable: `env NAME=\"value\"` or `env NAME`",
+        )),
+        _ => Err(error_at(
+            path,
+            text,
+            node,
+            "`env` takes either a literal `NAME=\"value\"` or a bare `NAME` to pass \
+             through from the host environment, not both",
+        )),
     }
 }
 
-/// Parse `source => target` into a `FileMapping`.
-fn parse_file_mapping(s: &str, line_no: usize, path: &Path) -> anyhow::Result<FileMapping> {
-    let Some((source, target)) = s.split_once("=>") else {
-        anyhow::bail!(
-            "{}:{}: file mapping expects `source => target`, got `{s}`",
-            path.display(),
-            line_no
-        );
+/// Parse `net { allow "host" port=443 }`.
+fn parse_net(
+    node: &KdlNode,
+    policy: &mut NetworkPolicy,
+    text: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
+    reject_properties(node, text, path)?;
+    if !arguments(node).is_empty() {
+        return Err(error_at(
+            path,
+            text,
+            node,
+            "`net` takes no arguments — declare endpoints as `net { allow \"host\" }`",
+        ));
+    }
+
+    let Some(children) = node.children() else {
+        // `net { }` with nothing in it is the same as no `net` at all: an
+        // empty allowlist, which means offline.
+        return Ok(());
     };
-    Ok(FileMapping {
-        source: source.trim().to_string(),
-        target: target.trim().to_string(),
-    })
+
+    for child in children.nodes() {
+        match child.name().value() {
+            "allow" => {
+                reject_children(child, text, path)?;
+                let host = only_string_argument(child, "allow", text, path)?;
+                let mut port = None;
+                for entry in properties(child) {
+                    match property_name(entry) {
+                        "port" => port = Some(port_value(entry, text, path)?),
+                        other => {
+                            return Err(error_at(
+                                path,
+                                text,
+                                entry,
+                                format!("unknown property `{other}` on `allow`"),
+                            ))
+                        }
+                    }
+                }
+                // The host is taken verbatim — no `host:port` splitting, so
+                // an IPv6 literal such as `::1` survives intact.
+                policy.allowed_endpoints.push(Endpoint { host, port });
+            }
+            unknown => {
+                return Err(error_at(
+                    path,
+                    text,
+                    child,
+                    format!("unknown node `{unknown}` inside `net`"),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A node's positional arguments, in source order.
+fn arguments(node: &KdlNode) -> Vec<&KdlEntry> {
+    node.entries()
+        .iter()
+        .filter(|entry| entry.name().is_none())
+        .collect()
+}
+
+/// A node's named properties, in source order.
+fn properties(node: &KdlNode) -> Vec<&KdlEntry> {
+    node.entries()
+        .iter()
+        .filter(|entry| entry.name().is_some())
+        .collect()
+}
+
+/// The name of a property entry. Only call this on entries from
+/// [`properties`], which are named by construction.
+fn property_name(entry: &KdlEntry) -> &str {
+    entry.name().map(|name| name.value()).unwrap_or_default()
+}
+
+/// Require exactly one string argument, e.g. the `"/work"` of `workdir`.
+fn only_string_argument(
+    node: &KdlNode,
+    what: &str,
+    text: &str,
+    path: &Path,
+) -> anyhow::Result<String> {
+    let arguments = arguments(node);
+    let [argument] = arguments.as_slice() else {
+        return Err(error_at(
+            path,
+            text,
+            node,
+            format!("`{what}` takes exactly one value, got {}", arguments.len()),
+        ));
+    };
+    string_value(argument, what, text, path)
+}
+
+/// Read an entry's value as a string. Bare identifiers (`env PI_PROVIDER`)
+/// and quoted strings both arrive as KDL strings; numbers and booleans do
+/// not, and are rejected rather than stringified.
+fn string_value(entry: &KdlEntry, what: &str, text: &str, path: &Path) -> anyhow::Result<String> {
+    entry
+        .value()
+        .as_string()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            error_at(
+                path,
+                text,
+                entry,
+                format!("`{what}` must be a string, got `{}`", entry.value()),
+            )
+        })
+}
+
+/// Read a `port=` property as a `u16`. Port 0 is rejected: it means
+/// "any port" to the kernel, which the allowlist expresses by omitting the
+/// property entirely.
+fn port_value(entry: &KdlEntry, text: &str, path: &Path) -> anyhow::Result<u16> {
+    let value = entry.value();
+    let number = value
+        .as_integer()
+        .ok_or_else(|| error_at(path, text, entry, format!("invalid port `{value}`")))?;
+    u16::try_from(number)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            error_at(
+                path,
+                text,
+                entry,
+                format!("invalid port `{number}` — must be between 1 and 65535"),
+            )
+        })
+}
+
+/// Validate an environment variable name. POSIX forbids `=` and NUL in a
+/// name, and an empty name cannot be exported at all; everything else is
+/// left to the host.
+fn env_key(key: &str, node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<String> {
+    if key.is_empty() || key.contains('=') || key.contains('\0') {
+        return Err(error_at(
+            path,
+            text,
+            node,
+            format!("`{key}` is not a usable environment variable name"),
+        ));
+    }
+    Ok(key.to_string())
+}
+
+/// Reject a child block on a node that does not take one.
+fn reject_children(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<()> {
+    if node.children().is_some() {
+        return Err(error_at(
+            path,
+            text,
+            node,
+            format!("`{}` takes no child block", node.name().value()),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject `key=value` properties on a node that does not take any.
+fn reject_properties(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<()> {
+    if let Some(entry) = properties(node).first() {
+        return Err(error_at(
+            path,
+            text,
+            *entry,
+            format!(
+                "`{}` takes no `{}=` property",
+                node.name().value(),
+                property_name(entry)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Anything with a source span: the node or entry an error points at.
+trait Spanned {
+    fn start(&self) -> usize;
+}
+
+impl Spanned for KdlNode {
+    fn start(&self) -> usize {
+        self.span().offset()
+    }
+}
+
+impl Spanned for KdlEntry {
+    fn start(&self) -> usize {
+        self.span().offset()
+    }
+}
+
+/// Build a `path:line:col: message` error pointing at a piece of the
+/// document. Errors are plain `anyhow` values: kdl's miette diagnostics are
+/// flattened to text here so hotcell never has to render them, and the
+/// `fancy` feature (with its terminal-drawing dependencies) stays out of the
+/// build.
+fn error_at(
+    path: &Path,
+    text: &str,
+    spanned: &impl Spanned,
+    message: impl Display,
+) -> anyhow::Error {
+    let (line, column) = line_column(text, spanned.start());
+    anyhow::anyhow!("{}:{line}:{column}: {message}", path.display())
+}
+
+/// Flatten a kdl parse failure into one `anyhow` error, one line per
+/// diagnostic, each located as `path:line:col`.
+fn syntax_error(error: &KdlError, text: &str, path: &Path) -> anyhow::Error {
+    let mut lines: Vec<String> = error
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let (line, column) = line_column(text, diagnostic.span.offset());
+            let message = diagnostic
+                .message
+                .clone()
+                .unwrap_or_else(|| "invalid KDL".to_string());
+            format!("{}:{line}:{column}: {message}", path.display())
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push(format!("{}: invalid KDL", path.display()));
+    }
+    if let Some(hint) = old_format_hint(text) {
+        lines.push(hint);
+    }
+    anyhow::anyhow!(lines.join("\n"))
+}
+
+/// Recognise a Cellfile still written in the v1 line format and say so,
+/// rather than leaving the reader with a bare KDL syntax error. This is a
+/// diagnostic only — the old format is gone, and nothing here parses it.
+fn old_format_hint(text: &str) -> Option<String> {
+    const V1_KEYS: [&str; 7] = [
+        "provision.type",
+        "provision.script",
+        "provision.host_path",
+        "workdir",
+        "package",
+        "net.allow",
+        "seed",
+    ];
+
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        let is_v1 = if line.starts_with('#') {
+            // The v1 format's comment character. KDL uses `//`.
+            true
+        } else if let Some((key, _)) = line.split_once('=') {
+            let key = key.trim();
+            key.starts_with("env.") || V1_KEYS.contains(&key)
+        } else {
+            false
+        };
+        if is_v1 {
+            return Some(format!(
+                "hint: line {} (`{line}`) looks like the old `key = value` Cellfile \
+                 format. Cellfiles are now KDL v2: `provision \"shell\" \
+                 script=\"./provision.sh\"`, `workdir \"/work\"`, `env NAME=\"value\"`, \
+                 `net {{ allow \"host\" port=443 }}`, and comments start with `//`.",
+                index + 1
+            ));
+        }
+    }
+    None
+}
+
+/// Convert a byte offset into the 1-based line and column a reader can find
+/// in an editor. Columns count characters, not bytes.
+fn line_column(text: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut column = 1;
+    for (index, character) in text.char_indices() {
+        if index >= offset {
+            break;
+        }
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 #[cfg(test)]
@@ -249,7 +637,7 @@ mod tests {
     use super::*;
 
     fn dir() -> PathBuf {
-        PathBuf::from("/tmp/x")
+        PathBuf::from("/tmp/x/Cellfile")
     }
 
     #[test]
@@ -258,31 +646,32 @@ mod tests {
         std::fs::write(t.path().join("Cellfile"), "").unwrap();
         let d = Cellfile::read(t.path()).unwrap();
         assert_eq!(d.declaration.provisioner.kind, "none");
-        assert!(d.declaration.packages.is_empty());
+        assert!(d.declaration.environment.is_empty());
+        assert!(d.declaration.network.allowed_endpoints.is_empty());
+        assert!(d.declaration.workdir.is_empty());
     }
 
     #[test]
-    fn parses_all_keys() {
-        let text = "\
-# a comment
-provision.type = shell
-provision.script = ./provision.sh
-provision.host_path = ~/.nvm/versions/node
-provision.host_path = ~/.cargo
-workdir = /work
+    fn parses_all_nodes() {
+        let text = r#"
+// a comment
+workdir "/work"
 
-package = node
-package = curl
+provision "shell" script="./provision.sh" {
+    host-path "~/.nvm/versions/node"
+    host-path "~/.cargo"
+}
 
-env.PATH = /opt/node/bin:/usr/bin
-env.HOME = /home/agent
+env PATH="/opt/node/bin:/usr/bin"
+env HOME="/home/agent"
+env PI_PROVIDER
+secret ANTHROPIC_API_KEY
 
-net.allow = api.openai.com:443
-net.allow = api.anthropic.com
-
-seed = ./src => /work/src
-seed = ~/.gitconfig => /home/agent/.gitconfig
-";
+net {
+    allow "api.openai.com" port=443
+    allow "api.anthropic.com"
+}
+"#;
         let decl = parse(text, &dir()).unwrap();
         assert_eq!(decl.provisioner.kind, "shell");
         assert_eq!(decl.provisioner.script.as_deref(), Some("./provision.sh"));
@@ -291,56 +680,166 @@ seed = ~/.gitconfig => /home/agent/.gitconfig
             vec!["~/.nvm/versions/node", "~/.cargo"]
         );
         assert_eq!(decl.workdir, "/work");
-        assert_eq!(decl.packages, vec!["node", "curl"]);
         assert_eq!(
-            decl.environment
-                .iter()
-                .map(|e| (e.key.as_str(), e.value.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("PATH", "/opt/node/bin:/usr/bin"), ("HOME", "/home/agent")]
+            decl.environment,
+            vec![
+                EnvVar {
+                    key: "PATH".to_string(),
+                    source: EnvSource::Literal("/opt/node/bin:/usr/bin".to_string()),
+                },
+                EnvVar {
+                    key: "HOME".to_string(),
+                    source: EnvSource::Literal("/home/agent".to_string()),
+                },
+                EnvVar {
+                    key: "PI_PROVIDER".to_string(),
+                    source: EnvSource::Passthrough,
+                },
+                EnvVar {
+                    key: "ANTHROPIC_API_KEY".to_string(),
+                    source: EnvSource::Secret,
+                },
+            ]
         );
         assert_eq!(decl.network.allowed_endpoints.len(), 2);
         assert_eq!(decl.network.allowed_endpoints[0].host, "api.openai.com");
         assert_eq!(decl.network.allowed_endpoints[0].port, Some(443));
-        assert_eq!(decl.network.allowed_endpoints[1].port, None);
-        assert_eq!(decl.files.len(), 2);
-        assert_eq!(decl.files[0].source, "./src");
-        assert_eq!(decl.files[0].target, "/work/src");
-    }
-
-    #[test]
-    fn unknown_key_is_an_error() {
-        let err = parse("frobnicate = yes", &dir()).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("unknown Cellfile key `frobnicate`"));
-    }
-
-    #[test]
-    fn trailing_comments_are_stripped() {
-        let text = "\
-provision.type = shell # inline comment
-net.allow = generativelanguage.googleapis.com:443 # Google
-net.allow = api.anthropic.com                  # Claude (anthropic)
-env.TOKEN = abc#def # not part of the value
-";
-        let decl = parse(text, &dir()).unwrap();
-        assert_eq!(decl.provisioner.kind, "shell");
-        assert_eq!(decl.network.allowed_endpoints.len(), 2);
-        assert_eq!(
-            decl.network.allowed_endpoints[0].host,
-            "generativelanguage.googleapis.com"
-        );
-        assert_eq!(decl.network.allowed_endpoints[0].port, Some(443));
         assert_eq!(decl.network.allowed_endpoints[1].host, "api.anthropic.com");
         assert_eq!(decl.network.allowed_endpoints[1].port, None);
-        // `#` without preceding whitespace is not a comment.
-        assert_eq!(decl.environment[0].value, "abc#def");
+        // Dropped from the grammar; nothing can populate them.
+        assert!(decl.packages.is_empty());
+        assert!(decl.files.is_empty());
+    }
+
+    #[test]
+    fn provision_none_and_empty_document_agree() {
+        let explicit = parse("provision \"none\"\n", &dir()).unwrap();
+        assert_eq!(explicit, parse("", &dir()).unwrap());
+        assert_eq!(explicit.provisioner.kind, "none");
+        assert!(explicit.provisioner.script.is_none());
+    }
+
+    #[test]
+    fn env_node_with_both_an_argument_and_a_property_is_an_error() {
+        let err = parse("env FOO=\"bar\" BAZ\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("/tmp/x/Cellfile:1:1:"), "{message}");
+        assert!(message.contains("not both"), "{message}");
+    }
+
+    #[test]
+    fn env_with_nothing_is_an_error() {
+        let err = parse("env\n", &dir()).unwrap_err();
+        assert!(err.to_string().contains("`env` needs a variable"));
+    }
+
+    #[test]
+    fn ipv6_endpoints_keep_their_colons() {
+        // The v1 format split `host:port` on the last colon, which silently
+        // mangled every IPv6 literal. Host and port are separate now.
+        let text = r#"
+net {
+    allow "::1"
+    allow "2001:db8::1" port=8443
+    allow "fe80::1%eth0"
+}
+"#;
+        let decl = parse(text, &dir()).unwrap();
+        assert_eq!(
+            decl.network.allowed_endpoints,
+            vec![
+                Endpoint {
+                    host: "::1".to_string(),
+                    port: None
+                },
+                Endpoint {
+                    host: "2001:db8::1".to_string(),
+                    port: Some(8443)
+                },
+                Endpoint {
+                    host: "fe80::1%eth0".to_string(),
+                    port: None
+                },
+            ]
+        );
     }
 
     #[test]
     fn bad_port_is_an_error() {
-        let err = parse("net.allow = host:notaport", &dir()).unwrap_err();
-        assert!(err.to_string().contains("invalid port"));
+        let err = parse("net {\n    allow \"host\" port=99999\n}\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("invalid port `99999`"), "{message}");
+        assert!(message.contains("/tmp/x/Cellfile:2:18:"), "{message}");
+
+        let err = parse("net {\n    allow \"host\" port=\"443\"\n}\n", &dir()).unwrap_err();
+        assert!(err.to_string().contains("invalid port"), "{err}");
+    }
+
+    #[test]
+    fn unknown_nodes_are_errors() {
+        let err = parse("frobnicate \"yes\"\n", &dir()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unknown Cellfile node `frobnicate`"));
+
+        let err = parse("net {\n    deny \"host\"\n}\n", &dir()).unwrap_err();
+        assert!(err.to_string().contains("unknown node `deny` inside `net`"));
+
+        let err = parse("provision \"shell\" scrpit=\"./p.sh\"\n", &dir()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unknown property `scrpit` on `provision`"));
+    }
+
+    #[test]
+    fn package_and_seed_report_that_they_are_gone() {
+        let err = parse("package \"node\"\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("`package` is not implemented"),
+            "{message}"
+        );
+
+        let err = parse("seed \"./src\"\n", &dir()).unwrap_err();
+        assert!(
+            err.to_string().contains("`seed` is not implemented"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn syntax_errors_are_located() {
+        let err = parse("workdir \"/work\"\nnet {\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("/tmp/x/Cellfile:2:"), "{message}");
+    }
+
+    #[test]
+    fn a_v1_cellfile_gets_a_migration_hint() {
+        let text = "\
+provision.type = shell
+workdir = /work
+env.PATH = /usr/bin
+";
+        let err = parse(text, &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("looks like the old `key = value` Cellfile format"),
+            "{message}"
+        );
+        assert!(
+            message.contains("line 1 (`provision.type = shell`)"),
+            "{message}"
+        );
+        assert!(message.contains("comments start with `//`"), "{message}");
+    }
+
+    #[test]
+    fn a_v1_hash_comment_gets_a_migration_hint() {
+        let err = parse("# a v1 comment\nworkdir \"/work\"\n", &dir()).unwrap_err();
+        assert!(
+            err.to_string().contains("comments start with `//`"),
+            "{err}"
+        );
     }
 }

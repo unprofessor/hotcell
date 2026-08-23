@@ -40,7 +40,7 @@ pub struct Cell {
     /// Root for cell state (`.cell/...`). The `--cell` override lands here,
     /// independently of where the Cellfile lives.
     pub cellfile_directory: PathBuf,
-    /// Directory of the Cellfile itself — where `provision.script` and
+    /// Directory of the Cellfile itself — where the provision `script` and
     /// relative declaration paths resolve. Distinct from `cellfile_directory`
     /// when `--cell` relocates state.
     pub file_directory: PathBuf,

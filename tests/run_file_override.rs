@@ -20,7 +20,7 @@ fn file_flag_reads_cellfile_at_explicit_path() {
 
     // A Cellfile in `elsewhere`, not in `dir` (our cwd). There is no
     // $PWD/Cellfile, so success here proves `--file` was used.
-    fs::write(elsewhere.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(elsewhere.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
@@ -55,7 +55,7 @@ fn short_flag_f_reads_cellfile_at_explicit_path() {
     let dir = tempfile::tempdir().unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
 
-    fs::write(elsewhere.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(elsewhere.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())

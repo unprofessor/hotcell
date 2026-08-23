@@ -61,7 +61,7 @@ fn destroy_with_stdin(
 fn destroy_confirms_on_y() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
     provision_cell(cwd.path(), cell_dir.path());
 
     let output = destroy_with_stdin(cwd.path(), cell_dir.path(), &[], "y\n");
@@ -84,7 +84,7 @@ fn destroy_confirms_on_y() {
 fn destroy_confirms_on_yes_uppercase() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
     provision_cell(cwd.path(), cell_dir.path());
 
     let output = destroy_with_stdin(cwd.path(), cell_dir.path(), &[], "YES\n");
@@ -102,7 +102,7 @@ fn destroy_confirms_on_yes_uppercase() {
 fn destroy_declines_on_n() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
     provision_cell(cwd.path(), cell_dir.path());
 
     let output = destroy_with_stdin(cwd.path(), cell_dir.path(), &[], "n\n");
@@ -122,7 +122,7 @@ fn destroy_declines_on_n() {
 fn destroy_aborts_on_eof_without_force() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
     provision_cell(cwd.path(), cell_dir.path());
 
     // `.output()` wires stdin to null, so the prompt reads EOF immediately.
@@ -147,7 +147,7 @@ fn destroy_aborts_on_eof_without_force() {
 fn destroy_force_bypasses_prompt() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
     provision_cell(cwd.path(), cell_dir.path());
 
     let output = Command::new(hotcell_bin())
@@ -180,7 +180,7 @@ fn destroy_force_bypasses_prompt() {
 fn destroy_declines_on_empty_answer() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
     provision_cell(cwd.path(), cell_dir.path());
 
     let output = destroy_with_stdin(cwd.path(), cell_dir.path(), &[], "\n");

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::cell::Cell;
-use crate::cellfile::{CellDeclaration, Provisioner as ProvisionerSpec};
+use crate::cellfile::{CellDeclaration, EnvSource, Provisioner as ProvisionerSpec};
 use crate::isolation;
 use crate::plan::PlanStep;
 use crate::state;
@@ -88,7 +88,9 @@ pub fn select_provisioner(spec: &ProvisionerSpec) -> anyhow::Result<Box<dyn Prov
         state::DEFAULT_PROVISIONER_KIND => Ok(Box::new(NoneProvisioner)),
         "shell" => {
             let script = spec.script.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("shell provisioner requires `provision.script` in the Cellfile")
+                anyhow::anyhow!(
+                "shell provisioner requires a `script=\"...\"` property on the `provision` node"
+            )
             })?;
             Ok(Box::new(ScriptProvisioner {
                 script: PathBuf::from(script),
@@ -142,12 +144,14 @@ pub fn resolve_provision_script(
     spec: &ProvisionerSpec,
 ) -> anyhow::Result<String> {
     let script = spec.script.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("shell provisioner requires `provision.script` in the Cellfile")
+        anyhow::anyhow!(
+            "shell provisioner requires a `script=\"...\"` property on the `provision` node"
+        )
     })?;
     let script_path = Path::new(script);
     if script_path.is_absolute() {
         anyhow::bail!(
-            "provision.script must be relative to the Cellfile directory, got absolute path `{}`",
+            "provision `script` must be relative to the Cellfile directory, got absolute path `{}`",
             script_path.display()
         );
     }
@@ -177,11 +181,17 @@ pub fn provision_control_env(
     declaration: &CellDeclaration,
     workdir: &str,
 ) -> Vec<(String, String)> {
+    // Only a literal `env HOME="..."` can be honoured here: this runs while
+    // the plan is being built, and a passthrough or secret has no value yet
+    // (the plan builder rejects those outright — see
+    // `resolve-env-passthrough-and-secrets`).
     let agent_home = declaration
         .environment
         .iter()
-        .find(|v| v.key == "HOME")
-        .map(|v| v.value.clone())
+        .find_map(|v| match &v.source {
+            EnvSource::Literal(value) if v.key == "HOME" => Some(value.clone()),
+            _ => None,
+        })
         .unwrap_or_else(|| "/home/agent".to_string());
     vec![
         ("HOTCELL_CELL_ROOT".to_string(), "/".to_string()),

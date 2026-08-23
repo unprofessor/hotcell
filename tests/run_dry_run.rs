@@ -59,7 +59,7 @@ fn dry_run_networked_shows_real_forwarder_command() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("Cellfile"),
-        "net.allow = api.example.com:443\n",
+        "net {\n    allow \"api.example.com\" port=443\n}\n",
     )
     .expect("write Cellfile");
 
@@ -169,7 +169,7 @@ fn dry_run_omits_provisioning_step_when_cell_current() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("Cellfile"),
-        "provision.type = shell\nprovision.script = ./p.sh\nworkdir = /work\n",
+        "provision \"shell\" script=\"./p.sh\"\nworkdir \"/work\"\n",
     )
     .expect("write Cellfile");
     fs::write(dir.path().join("p.sh"), "#!/bin/sh\nexit 0\n").expect("write p.sh");
@@ -210,7 +210,7 @@ fn dry_run_shows_provisioning_step_for_shell_cell() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("Cellfile"),
-        "provision.type = shell\nprovision.script = ./p.sh\n",
+        "provision \"shell\" script=\"./p.sh\"\n",
     )
     .expect("write Cellfile");
     fs::write(dir.path().join("p.sh"), "#!/bin/sh\nexit 0\n").expect("write p.sh");
@@ -241,7 +241,7 @@ fn dry_run_shows_provisioning_step_for_shell_cell() {
 #[test]
 fn missing_script_fails_before_prompt() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("Cellfile"), "provision.type = shell\n").expect("write Cellfile");
+    fs::write(dir.path().join("Cellfile"), "provision \"shell\"\n").expect("write Cellfile");
 
     let output = Command::new(hotcell_bin())
         .current_dir(dir.path())
@@ -251,7 +251,7 @@ fn missing_script_fails_before_prompt() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
-    assert!(stderr.contains("provision.script"), "stderr: {stderr}");
+    assert!(stderr.contains("requires a `script="), "stderr: {stderr}");
     assert!(
         !dir.path().join(".cell").exists(),
         "no state on config error"
@@ -259,7 +259,7 @@ fn missing_script_fails_before_prompt() {
 }
 
 /// Relative host paths — a relative `--file`, or a relative
-/// `provision.host_path` — are absolutized in the plan, so the displayed
+/// `host-path` — are absolutized in the plan, so the displayed
 /// command is unambiguous and resolves identically when copied and pasted
 /// from any directory.
 #[test]
@@ -269,7 +269,7 @@ fn dry_run_absolutizes_relative_paths() {
     fs::create_dir_all(&sub).expect("create sub");
     fs::write(
         sub.join("Cellfile"),
-        "provision.type = shell\nprovision.script = ./p.sh\nprovision.host_path = ./tools\n",
+        "provision \"shell\" script=\"./p.sh\" {\n    host-path \"./tools\"\n}\n",
     )
     .expect("write Cellfile");
     fs::write(sub.join("p.sh"), "#!/bin/sh\nexit 0\n").expect("write p.sh");

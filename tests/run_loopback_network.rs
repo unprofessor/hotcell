@@ -56,17 +56,15 @@ fn skip_if_no_python3() -> bool {
 }
 
 /// Write a Cellfile + a trivial provisioner that creates the workdir, in the
-/// given temp dir. `net_allow` is the `net.allow` line content (or empty for
-/// an offline cell).
+/// given temp dir. `net_allow` is the body of the `net` block — an
+/// `allow "host" port=N` line — or empty for an offline cell.
 fn write_cellfile(dir: &TempDir, net_allow: &str) {
     let mut content = String::from(
-        "provision.type = shell\n\
-         provision.script = ./provision.sh\n\
-         workdir = /work\n",
+        "provision \"shell\" script=\"./provision.sh\"\n\
+         workdir \"/work\"\n",
     );
     if !net_allow.is_empty() {
-        content.push_str(net_allow);
-        content.push('\n');
+        content.push_str(&format!("net {{\n    {net_allow}\n}}\n"));
     }
     fs::write(dir.path().join("Cellfile"), content).unwrap();
     fs::write(
@@ -171,7 +169,7 @@ fn networked_agent_reaches_loopback_proxy() {
     let echo_addr = spawn_echo_server();
     let echo_port = echo_addr.rsplit_once(':').unwrap().1;
     let dir = TempDir::new().expect("create temp dir");
-    write_cellfile(&dir, &format!("net.allow = 127.0.0.1:{echo_port}"));
+    write_cellfile(&dir, &format!("allow \"127.0.0.1\" port={echo_port}"));
 
     // The agent reads HTTP_PROXY (set by the in-namespace forwarder to its own
     // loopback address), issues CONNECT to the allowed echo endpoint, expects
@@ -242,7 +240,7 @@ fn networked_agent_cannot_reach_non_loopback() {
     // (exercising the full networked path) while asserting non-loopback is
     // still blocked.
     let dir = TempDir::new().expect("create temp dir");
-    write_cellfile(&dir, "net.allow = api.openai.com:443");
+    write_cellfile(&dir, "allow \"api.openai.com\" port=443");
 
     let script = r#"
 import os, socket, sys

@@ -19,7 +19,7 @@ fn cell_flag_relocates_state_directory() {
     let cell_dir = tempfile::tempdir().unwrap();
 
     // A Cellfile in cwd (the conventional location).
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     let output = Command::new(hotcell_bin())
         .current_dir(cwd.path())
@@ -60,7 +60,7 @@ fn short_flag_c_relocates_state_directory() {
     let cwd = tempfile::tempdir().unwrap();
     let cell_dir = tempfile::tempdir().unwrap();
 
-    fs::write(cwd.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(cwd.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     let output = Command::new(hotcell_bin())
         .current_dir(cwd.path())
@@ -95,7 +95,7 @@ fn file_and_cell_combine_independently() {
     let cell_dir = tempfile::tempdir().unwrap();
 
     // No Cellfile in cwd; the only Cellfile is in `elsewhere`.
-    fs::write(elsewhere.path().join("Cellfile"), "workdir = /work\n").unwrap();
+    fs::write(elsewhere.path().join("Cellfile"), "workdir \"/work\"\n").unwrap();
 
     let output = Command::new(hotcell_bin())
         .current_dir(cwd.path())

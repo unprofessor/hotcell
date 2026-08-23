@@ -15,7 +15,7 @@ fn hotcell_bin() -> String {
     env!("CARGO_BIN_EXE_hotcell").to_string()
 }
 
-/// The provisioner can read a declared `provision.host_path` and copy a tool
+/// The provisioner can read a declared `host-path` and copy a tool
 /// from it into the cell rootfs; the agent then runs that tool, proving the
 /// provisioner's bootstrap allowance worked.
 #[test]
@@ -29,10 +29,10 @@ fn provisioner_can_read_declared_host_path() {
     fs::write(
         dir.path().join("Cellfile"),
         format!(
-            "provision.type = shell\n\
-             provision.script = ./provision.sh\n\
-             provision.host_path = {host}\n\
-             workdir = /work\n",
+            "provision \"shell\" script=\"./provision.sh\" {{\n\
+             host-path \"{host}\"\n\
+             }}\n\
+             workdir \"/work\"\n",
             host = host_tools.path().display()
         ),
     )
@@ -90,10 +90,10 @@ fn agent_cannot_see_provisioner_host_paths() {
     fs::write(
         dir.path().join("Cellfile"),
         format!(
-            "provision.type = shell\n\
-             provision.script = ./provision.sh\n\
-             provision.host_path = {host}\n\
-             workdir = /work\n",
+            "provision \"shell\" script=\"./provision.sh\" {{\n\
+             host-path \"{host}\"\n\
+             }}\n\
+             workdir \"/work\"\n",
             host = host_tools.path().display()
         ),
     )
@@ -134,7 +134,7 @@ fn agent_cannot_see_provisioner_host_paths() {
 }
 
 /// The agent runs with a clean environment: no host environment variables
-/// leak in, only the declared `env.*` vars are present.
+/// leak in, only the declared `env` vars are present.
 #[test]
 fn agent_has_clean_environment() {
     let dir = TempDir::new().expect("create temp dir");
@@ -142,7 +142,7 @@ fn agent_has_clean_environment() {
     // Use the none provisioner (no script needed).
     fs::write(
         dir.path().join("Cellfile"),
-        "workdir = /work\nenv.HOTCELL_TEST_VAR = provisioned\n",
+        "workdir \"/work\"\nenv HOTCELL_TEST_VAR=\"provisioned\"\n",
     )
     .expect("write Cellfile");
 
@@ -188,11 +188,11 @@ fn host_home_does_not_leak_into_cell() {
     fs::write(
         dir.path().join("Cellfile"),
         format!(
-            "provision.type = shell\n\
-             provision.script = ./provision.sh\n\
-             provision.host_path = {home}/.pi\n\
-             provision.host_path = {home}/.gitconfig\n\
-             workdir = /work\n",
+            "provision \"shell\" script=\"./provision.sh\" {{\n\
+             host-path \"{home}/.pi\"\n\
+             host-path \"{home}/.gitconfig\"\n\
+             }}\n\
+             workdir \"/work\"\n",
             home = host_home.path().display()
         ),
     )
