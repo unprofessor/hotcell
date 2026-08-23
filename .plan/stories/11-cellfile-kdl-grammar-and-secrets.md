@@ -81,6 +81,7 @@ net {
 - `resolve-env-passthrough-and-secrets`
 - `redact-secrets-in-execution-plan`
 - `document-kdl-cellfile-format`
+- `realign-allium-spec-with-env-sources`
 
 ## Notes
 
@@ -92,3 +93,8 @@ net {
   the KDL grammar. The leader should sequence these deliberately.
 - Deliberately excluded: whether `environment` should participate in cell
   identity at all — see `env-changes-should-not-reprovision`.
+- 2026-08-23 the story shipped four tasks and no spec work, which was an
+  omission: changing `EnvVar`'s shape diverges the code from
+  `hotcell.allium`. Surfaced by the reviewer of the parser task and covered by
+  `realign-allium-spec-with-env-sources`, sequenced last so the spec is edited
+  once rather than after each behaviour change.
