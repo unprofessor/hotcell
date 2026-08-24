@@ -4,7 +4,7 @@ aliases: [resolve-env-passthrough-and-secrets]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Resolve passthrough and secret env vars at launch
-status: review
+status: done
 assignee: null
 created: 2026-08-23
 updated: 2026-08-24
