@@ -4,10 +4,10 @@ aliases: [document-kdl-cellfile-format]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Document the KDL Cellfile format
-status: todo
+status: in_progress
 assignee: null
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-08-24
 tags: [docs, cellfile]
 depends_on: [replace-cellfile-parser-with-kdl, resolve-env-passthrough-and-secrets, redact-secrets-in-execution-plan]
 ---
