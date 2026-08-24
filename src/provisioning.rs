@@ -270,7 +270,9 @@ impl Provisioner for NoneProvisioner {
 }
 
 /// The shell-script provisioner (`kind = "shell"`). It executes the script
-/// declared at `provision.script` **inside the provisioning sandbox** — the
+/// declared as the `script` property of the `provision` node
+/// (`provision "shell" script="./provision.sh"`) **inside the provisioning
+/// sandbox** — the
 /// cell rootfs is `/`, the Cellfile directory and declared host paths are
 /// read-only, and network egress is enabled. The script seeds the rootfs
 /// (installing tools, copying files, creating the working directory) and must

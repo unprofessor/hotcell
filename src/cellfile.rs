@@ -38,7 +38,10 @@
 //!
 //! Unknown nodes are errors: the format fails closed, so a typo in a
 //! security-relevant directive (`nett { allow ... }`) cannot be silently
-//! ignored. `package` and `seed` from the v1 line format are deliberately
+//! ignored. A KDL type annotation (`(ty)node` or `key=(ty)value`) is likewise
+//! an error rather than a silent no-op — the grammar gives annotations no
+//! meaning, and dropping something the author wrote would break that
+//! contract. `package` and `seed` from the v1 line format are deliberately
 //! *not* in this grammar — no provisioner ever acted on them — and naming
 //! either yields an error saying so.
 //!
@@ -48,7 +51,7 @@
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
-use kdl::{KdlDocument, KdlEntry, KdlError, KdlNode};
+use kdl::{KdlDocument, KdlEntry, KdlError, KdlIdentifier, KdlNode};
 use serde::{Deserialize, Serialize};
 
 /// `Endpoint` value type: a host and optional port.
@@ -204,6 +207,7 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
     // design.
     let mut seen = SingleValued::default();
     for node in document.nodes() {
+        reject_annotations(node, text, path)?;
         match node.name().value() {
             "workdir" => {
                 seen.workdir.check(node, "workdir", text, path)?;
@@ -327,6 +331,7 @@ fn parse_provision(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<Pr
 
     if let Some(children) = node.children() {
         for child in children.nodes() {
+            reject_annotations(child, text, path)?;
             match child.name().value() {
                 "host-path" => {
                     reject_children(child, text, path)?;
@@ -381,6 +386,26 @@ fn parse_env(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<EnvVar> 
             node,
             "`env` needs a variable: `env NAME=\"value\"` or `env NAME`",
         )),
+        ([], properties) => Err(error_at(
+            path,
+            text,
+            node,
+            format!(
+                "`env` declares one variable at a time; got {} `NAME=\"value\"` \
+                 properties — write a separate `env` node for each",
+                properties.len()
+            ),
+        )),
+        (arguments, []) => Err(error_at(
+            path,
+            text,
+            node,
+            format!(
+                "`env` passes through one variable at a time; got {} bare names — \
+                 write a separate `env NAME` node for each",
+                arguments.len()
+            ),
+        )),
         _ => Err(error_at(
             path,
             text,
@@ -415,6 +440,7 @@ fn parse_net(
     };
 
     for child in children.nodes() {
+        reject_annotations(child, text, path)?;
         match child.name().value() {
             "allow" => {
                 reject_children(child, text, path)?;
@@ -575,9 +601,51 @@ fn reject_properties(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<
     Ok(())
 }
 
+/// Reject a KDL type annotation wherever it appears — on the node itself
+/// (`(ty)workdir "/work"`) or on any of its values (`workdir (ty)"/work"`,
+/// `allow "host" port=(ty)443`). The grammar assigns no meaning to
+/// annotations, and silently dropping something the author wrote would break
+/// the fail-closed contract, so an annotation is a source-located error
+/// rather than a no-op.
+fn reject_annotations(node: &KdlNode, text: &str, path: &Path) -> anyhow::Result<()> {
+    if let Some(ty) = node.ty() {
+        return Err(error_at(
+            path,
+            text,
+            ty,
+            format!(
+                "type annotation `({})` on `{}` is not supported",
+                ty.value(),
+                node.name().value()
+            ),
+        ));
+    }
+    for entry in node.entries() {
+        if let Some(ty) = entry.ty() {
+            return Err(error_at(
+                path,
+                text,
+                ty,
+                format!(
+                    "type annotation `({})` on a value of `{}` is not supported",
+                    ty.value(),
+                    node.name().value()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Anything with a source span: the node or entry an error points at.
 trait Spanned {
     fn start(&self) -> usize;
+}
+
+impl Spanned for KdlIdentifier {
+    fn start(&self) -> usize {
+        self.span().offset()
+    }
 }
 
 impl Spanned for KdlNode {
@@ -610,23 +678,23 @@ fn error_at(
 /// Flatten a kdl parse failure into one `anyhow` error, one line per
 /// diagnostic, each located as `path:line:col`.
 fn syntax_error(error: &KdlError, text: &str, path: &Path) -> anyhow::Error {
-    let mut lines: Vec<String> = error
-        .diagnostics
-        .iter()
-        .map(|diagnostic| {
-            let (line, column) = line_column(text, diagnostic.span.offset());
-            let message = diagnostic
-                .message
-                .clone()
-                .unwrap_or_else(|| "invalid KDL".to_string());
-            format!("{}:{line}:{column}: {message}", path.display())
-        })
-        .collect();
-    if lines.is_empty() {
-        lines.push(format!("{}: invalid KDL", path.display()));
-    }
+    let mut lines: Vec<String> = Vec::new();
+    // The migration hint is the only line that helps a reader whose file is
+    // still in the v1 format, so it leads; the raw KDL diagnostics — up to a
+    // dozen "Expected end of document" lines for one v1 file — follow it.
     if let Some(hint) = old_format_hint(text) {
         lines.push(hint);
+    }
+    lines.extend(error.diagnostics.iter().map(|diagnostic| {
+        let (line, column) = line_column(text, diagnostic.span.offset());
+        let message = diagnostic
+            .message
+            .clone()
+            .unwrap_or_else(|| "invalid KDL".to_string());
+        format!("{}:{line}:{column}: {message}", path.display())
+    }));
+    if lines.is_empty() {
+        lines.push(format!("{}: invalid KDL", path.display()));
     }
     anyhow::anyhow!(lines.join("\n"))
 }
@@ -1019,6 +1087,80 @@ net {
                     port: None
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_type_annotation_on_a_node_is_an_error() {
+        // Finding 2: `(ty)workdir "/annotated"` used to parse as `workdir`,
+        // silently dropping the annotation. It must now be a located error.
+        let err = parse("(ty)workdir \"/annotated\"\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("type annotation `(ty)` on `workdir` is not supported"),
+            "{message}"
+        );
+        assert!(message.contains("/tmp/x/Cellfile:1:2:"), "{message}");
+    }
+
+    #[test]
+    fn a_type_annotation_on_a_value_is_an_error() {
+        // The annotation on a value (`workdir (ty)"/x"`) was equally ignored.
+        let err = parse("workdir (ty)\"/annotated\"\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("type annotation `(ty)` on a value of `workdir` is not supported"),
+            "{message}"
+        );
+        assert!(message.contains("/tmp/x/Cellfile:1:10:"), "{message}");
+
+        // Also inside a child block, e.g. an annotated port.
+        let err = parse("net {\n    allow \"h\" port=(u8)80\n}\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("type annotation `(u8)` on a value of `allow` is not supported"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn env_with_two_properties_says_one_at_a_time() {
+        // Finding 3: `env FOO="a" BAR="b"` used to hit the "…not both" arm,
+        // describing a problem the input does not have. The message must now
+        // name the real problem: two literals on one node.
+        let err = parse("env FOO=\"a\" BAR=\"b\"\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("`env` declares one variable at a time; got 2"),
+            "{message}"
+        );
+        assert!(!message.contains("not both"), "{message}");
+        assert!(message.contains("/tmp/x/Cellfile:1:1:"), "{message}");
+    }
+
+    #[test]
+    fn env_with_two_bare_names_says_one_at_a_time() {
+        // The mirror case: two passthroughs on one node.
+        let err = parse("env FOO BAR\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("`env` passes through one variable at a time; got 2"),
+            "{message}"
+        );
+        assert!(!message.contains("not both"), "{message}");
+    }
+
+    #[test]
+    fn a_v1_cellfile_leads_with_the_migration_hint() {
+        // Finding 4: the hint used to print *after* up to a dozen raw KDL
+        // diagnostics. It is the only line that helps, so it must lead.
+        let text = "provision.type = shell\nworkdir = /work\nenv.PATH = /usr/bin\n";
+        let err = parse(text, &dir()).unwrap_err();
+        let message = err.to_string();
+        let first_line = message.lines().next().unwrap_or_default();
+        assert!(
+            first_line.contains("looks like the old `key = value` Cellfile format"),
+            "hint should lead; first line was `{first_line}`\nfull:\n{message}"
         );
     }
 }
