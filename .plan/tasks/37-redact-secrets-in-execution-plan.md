@@ -4,10 +4,10 @@ aliases: [redact-secrets-in-execution-plan]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Redact secrets in the rendered execution plan
-status: todo
+status: done
 assignee: null
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-08-24
 tags: [secrets, plan]
 depends_on: [resolve-env-passthrough-and-secrets]
 ---
@@ -32,18 +32,102 @@ follow.
 
 ## Acceptance
 
-- [ ] `Secret` vars render as `--setenv NAME <redacted>`; the line is present,
+- [x] `Secret` vars render as `--setenv NAME <redacted>`; the line is present,
   so the developer can see the var is being passed.
-- [ ] `Literal` and `Passthrough` vars render their real values — passthrough
+- [x] `Literal` and `Passthrough` vars render their real values — passthrough
   is not secret, and hiding it would obscure what the agent receives.
-- [ ] When at least one secret is present, the rendered plan carries a footer
+- [x] When at least one secret is present, the rendered plan carries a footer
   noting that the block will not run verbatim as shown.
-- [ ] A test asserts no secret value appears anywhere in rendered plan output,
+- [x] A test asserts no secret value appears anywhere in rendered plan output,
   for both `run` and `--dry-run`.
-- [ ] `cargo test` and `cargo clippy --all-targets` pass.
+- [x] `cargo test` and `cargo clippy --all-targets` pass.
 
 ## Notes
 
 - 2026-08-23 created. Redaction is driven by the declared `Secret` source, not
   by a heuristic over key names — a heuristic would miss `PI_TOKEN` and mangle
   vars the developer wanted to read.
+- 2026-08-24 implemented. Design: the step `Argument`s keep the *real* secret
+  value (so `collapse` still runs the correct command — the plan stays the
+  single source of truth for execution); redaction is display-only, applied in
+  `ExecutionPlan::render`. The plan carries a new `secret_keys: Vec<String>`
+  field (declared `Secret` keys); `render_step`/`render_argument` mask the
+  value of any `--setenv <secret-key>` as the unquoted marker `<redacted>`, and
+  `render` appends the footer when `secret_keys` is non-empty. The placeholder
+  is intentionally left unquoted so it reads as a marker, not a literal — the
+  footer already states the block will not run verbatim.
+- 2026-08-24 updated `passthrough_and_secret_vars_resolve_from_the_host_environment`
+  in `tests/run_cellfile_grammar.rs`: the `resolve-env-passthrough-and-secrets`
+  task asserted the raw secret value reached `--setenv`, which is exactly the
+  behaviour this task reverses. Now it asserts redaction + absence of the raw
+  value + the footer. Not scope creep — it is this task's behaviour change.
+- 2026-08-24 adjacent finding (not actioned): the docs task
+  `document-kdl-cellfile-format` should mention that a Cellfile with a `secret`
+  cannot be copy-pasted and run verbatim from the plan output.
+
+## Validation
+
+Ran in the task worktree on 2026-08-24.
+
+- `cargo build` — clean (`Finished dev profile`).
+- `cargo clippy --all-targets` — clean, no warnings.
+- `cargo test` — all suites green (unit lib incl. new plan tests: 34 passed;
+  every integration binary passed; 0 failed across the run).
+
+New tests (`src/plan.rs`):
+- `secret_setenv_line_is_present_but_redacted` — `--setenv ANTHROPIC_API_KEY
+  <redacted>` present; raw value absent.
+- `literal_and_passthrough_values_are_shown_in_full` — `PATH` and `PI_PROVIDER`
+  show real values.
+- `footer_appears_only_when_a_secret_is_present` — footer present with a secret,
+  absent (and no `<redacted>`) without one; the no-secret plan shows the full
+  value verbatim.
+- `build_execution_plan_redacts_the_declared_secret` — end-to-end through
+  `build_execution_plan`: secret resolved from the host env, `secret_keys`
+  populated, value redacted in `render()`, raw value absent, footer present.
+  `render()` is the single string printed on both `run` and `--dry-run` (the
+  `eprintln!(plan.render())` in `cli.rs` runs before the `--dry-run` exit).
+
+Updated test (`tests/run_cellfile_grammar.rs`, real `hotcell run --dry-run`):
+- `passthrough_and_secret_vars_resolve_from_the_host_environment` — passthrough
+  shows real value; secret shows `<redacted>`; raw `sk-from-host-env` absent;
+  footer present.
+- `a_plan_without_secrets_shows_every_value_and_no_footer` (new) — full value,
+  no `<redacted>`, no footer.
+
+Manual `--dry-run` (real binary):
+- With `secret ANTHROPIC_API_KEY=sk-ant-REALVALUE-123`: rendered
+  `--setenv ANTHROPIC_API_KEY <redacted>`, `--setenv PATH /opt/bin:/usr/bin`,
+  `--setenv PI_PROVIDER anthropic`, footer printed, raw value never printed
+  (grep for the value returned nothing), exit 0.
+- Without any secret: full passthrough value shown, no `<redacted>`, no footer.
+
+## Review
+
+verdict: approved
+reviewer: reviewer-agent
+date: 2026-08-24
+
+Re-verified independently in the worktree (fresh context, did not trust the
+worker's self-report):
+
+- `cargo build`, `cargo clippy --all-targets`, `cargo test` all clean — every
+  suite green (lib 34 passed; all integration binaries 0 failed).
+- Real `hotcell run ... --dry-run` with `secret ANTHROPIC_API_KEY` set to a
+  known value: rendered `--setenv ANTHROPIC_API_KEY <redacted>`, showed
+  `--setenv PATH ...` and `--setenv PI_PROVIDER anthropic` with real values,
+  and printed the "will NOT run verbatim as shown" footer. `grep` for the raw
+  secret value in the full output returned 0 matches.
+- No-secret dry-run: passthrough shown in full, no `<redacted>`, no footer.
+- Display-only redaction confirmed at the source: `render_argument` masks only
+  the display string, while execution goes through `PlanStep::command` →
+  `isolation::collapse`, which builds the argv from the real `arg.values`. The
+  plan remains the single execution source of truth; the real value reaches the
+  sandbox unchanged.
+- Scope correct: only `src/plan.rs`, `tests/run_cellfile_grammar.rs`, and this
+  task file changed; no other `.plan/` files.
+- The updated `passthrough_and_secret_vars_resolve_from_the_host_environment`
+  test is a correct, intentional behaviour change, not a masked regression: the
+  old assertion checked that the raw secret reached `--setenv`, which is exactly
+  the leak this task removes. It now asserts redaction + absence of the raw
+  value + footer, and a new sibling test covers the no-secret path.

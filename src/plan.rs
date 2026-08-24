@@ -74,6 +74,13 @@ pub struct ExecutionPlan {
     /// Loopback bridge configuration for firewall egress, built from the
     /// real cell-scoped paths with no side effects. `None` for offline cells.
     pub bridge: Option<AgentBridge>,
+
+    /// Names of env vars declared as `secret`. Their real values live in the
+    /// step arguments (so execution is unchanged), but [`ExecutionPlan::render`]
+    /// masks each one's `--setenv` value as `<redacted>` for display, and its
+    /// non-emptiness drives the redaction footer. Redaction is keyed off the
+    /// declared `Secret` source, not a heuristic over the variable name.
+    pub secret_keys: Vec<String>,
 }
 
 impl ExecutionPlan {
@@ -90,7 +97,7 @@ impl ExecutionPlan {
             Some(step) => blocks.push(format!(
                 "=== {} bwrap ===\n{}",
                 step.label,
-                render_step(&step.arguments)
+                render_step(&step.arguments, &self.secret_keys)
             )),
             None if self.provisioning_skipped => blocks.push(
                 "provisioning: skipped (cell already provisioned with current inputs)".to_string(),
@@ -100,13 +107,20 @@ impl ExecutionPlan {
         blocks.push(format!(
             "=== {} bwrap ===\n{}",
             self.agent.label,
-            render_step(&self.agent.arguments)
+            render_step(&self.agent.arguments, &self.secret_keys)
         ));
         let mut out = blocks.join("\n\n");
         if self.bridge.is_some() {
             out.push_str(
                 "\n\n(the agent's HTTP_PROXY/HTTPS_PROXY are set inside the sandbox by the \
                  hotcell forwarder after it binds its port)",
+            );
+        }
+        if !self.secret_keys.is_empty() {
+            out.push_str(
+                "\n\n(a declared secret is shown as <redacted>: this block will NOT run \
+                 verbatim as shown — the real value is read from hotcell's environment at \
+                 run time and never printed)",
             );
         }
         out
@@ -122,7 +136,7 @@ impl ExecutionPlan {
 /// value is POSIX-quoted via `shlex`, so the block runs verbatim when
 /// pasted into a shell (line breaks fall only between arguments, and a
 /// continuation joins them back into the same argv).
-fn render_step(arguments: &[Argument]) -> String {
+fn render_step(arguments: &[Argument], secret_keys: &[String]) -> String {
     if arguments.is_empty() {
         return "bwrap".to_string();
     }
@@ -148,11 +162,7 @@ fn render_step(arguments: &[Argument]) -> String {
             }
             continue;
         }
-        let line = std::iter::once(&arg.flag)
-            .chain(arg.values.iter())
-            .map(|s| quote_arg(s))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let line = render_argument(arg, secret_keys);
         if is_last {
             lines.push(format!("  {line}"));
         } else {
@@ -160,6 +170,30 @@ fn render_step(arguments: &[Argument]) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// Placeholder shown in place of a declared secret's value. Intentionally
+/// unquoted so it reads as a marker rather than a literal value — the
+/// redaction footer already tells the developer the block will not run as
+/// shown.
+const REDACTED: &str = "<redacted>";
+
+/// Render one argument (`--flag v1 v2`) for display, masking the value of a
+/// `--setenv NAME VALUE` whose NAME is a declared secret. The real value stays
+/// in the argument for execution; only this display string is redacted.
+fn render_argument(arg: &Argument, secret_keys: &[String]) -> String {
+    if arg.flag == "--setenv" {
+        if let [key, _value] = arg.values.as_slice() {
+            if secret_keys.iter().any(|k| k == key) {
+                return format!("{} {} {}", quote_arg(&arg.flag), quote_arg(key), REDACTED);
+            }
+        }
+    }
+    std::iter::once(&arg.flag)
+        .chain(arg.values.iter())
+        .map(|s| quote_arg(s))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// POSIX-quote one flag or value for shell display.
@@ -253,6 +287,16 @@ pub fn build_execution_plan(
     // or the declaration comparison that decides cell identity.
     let env = resolve_environment(&declaration.environment, |key| std::env::var(key).ok())?;
 
+    // Names declared as `secret`, so `render` can mask their `--setenv` values.
+    // The resolved values themselves stay only in `env` (and thus in the agent
+    // step's arguments, for execution); this is just the key list.
+    let secret_keys: Vec<String> = declaration
+        .environment
+        .iter()
+        .filter(|var| matches!(var.source, EnvSource::Secret))
+        .map(|var| var.key.clone())
+        .collect();
+
     // Only the `shell` provisioner has a bwrap step: it runs inside the
     // sandbox. The `none` provisioner works host-side (a plain mkdir) and
     // never gets one. When the cell is already provisioned with current
@@ -309,6 +353,7 @@ pub fn build_execution_plan(
         provisioning,
         agent,
         bridge,
+        secret_keys,
     })
 }
 
@@ -399,5 +444,129 @@ mod tests {
         let err =
             resolve_environment(&env, lookup_from(&[("PRESENT", "here")])).unwrap_err();
         assert!(err.to_string().contains("secret `MISSING`"), "{err}");
+    }
+
+    /// The literal secret value used across the redaction tests. If it ever
+    /// appears in rendered output, redaction has failed.
+    const SECRET_VALUE: &str = "sk-ant-super-secret-000";
+
+    /// Build a plan whose agent step sets a literal, a passthrough, and a
+    /// secret env var (the secret keyed by `secret_keys`). The `--setenv`
+    /// arguments carry the *real* resolved values — exactly what execution
+    /// would run — so the render tests exercise display-only redaction.
+    fn plan_with_env(secret_keys: Vec<String>) -> ExecutionPlan {
+        let cell_fs = PathBuf::from("/var/lib/hotcell/cell/fs");
+        let env = vec![
+            ("PATH".to_string(), "/opt/bin".to_string()),
+            ("PI_PROVIDER".to_string(), "anthropic".to_string()),
+            ("ANTHROPIC_API_KEY".to_string(), SECRET_VALUE.to_string()),
+        ];
+        let agent = PlanStep::new(
+            "agent",
+            isolation::build_agent_command(
+                &cell_fs,
+                DEFAULT_WORKDIR,
+                &env,
+                None,
+                "/bin/echo",
+                &["hi".to_string()],
+            ),
+        );
+        ExecutionPlan {
+            cell_fs,
+            workdir: DEFAULT_WORKDIR.to_string(),
+            provisioning: None,
+            provisioning_skipped: false,
+            agent,
+            bridge: None,
+            secret_keys,
+        }
+    }
+
+    #[test]
+    fn secret_setenv_line_is_present_but_redacted() {
+        let rendered = plan_with_env(vec!["ANTHROPIC_API_KEY".to_string()]).render();
+        // The line is present so the var is visibly passed, but the value is
+        // masked and the real value appears nowhere in the output.
+        assert!(
+            rendered.contains("--setenv ANTHROPIC_API_KEY <redacted>"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(SECRET_VALUE), "{rendered}");
+    }
+
+    #[test]
+    fn literal_and_passthrough_values_are_shown_in_full() {
+        let rendered = plan_with_env(vec!["ANTHROPIC_API_KEY".to_string()]).render();
+        // Passthrough is not secret; hiding it would obscure what the agent
+        // receives. Literals are declared in the Cellfile already.
+        assert!(rendered.contains("--setenv PATH /opt/bin"), "{rendered}");
+        assert!(
+            rendered.contains("--setenv PI_PROVIDER anthropic"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn footer_appears_only_when_a_secret_is_present() {
+        let with_secret = plan_with_env(vec!["ANTHROPIC_API_KEY".to_string()]).render();
+        assert!(
+            with_secret.contains("will NOT run verbatim as shown"),
+            "footer missing: {with_secret}"
+        );
+
+        // No declared secret -> no footer, and every value shows in full
+        // (the block runs verbatim).
+        let without_secret = plan_with_env(vec![]).render();
+        assert!(!without_secret.contains("<redacted>"), "{without_secret}");
+        assert!(
+            !without_secret.contains("NOT run verbatim"),
+            "{without_secret}"
+        );
+        assert!(
+            without_secret.contains(&format!("--setenv ANTHROPIC_API_KEY {SECRET_VALUE}")),
+            "{without_secret}"
+        );
+    }
+
+    /// End-to-end through `build_execution_plan`: a `secret`-declared var is
+    /// resolved from hotcell's own environment, and the rendered plan — the
+    /// same string printed on both `run` and `--dry-run`, before either
+    /// branches — never contains the resolved value. Uses a uniquely named
+    /// env var so it does not collide with other tests.
+    #[test]
+    fn build_execution_plan_redacts_the_declared_secret() {
+        use crate::cellfile::{CellDeclaration, Cellfile};
+
+        const KEY: &str = "HOTCELL_TEST_SECRET_37";
+        // SAFETY (edition 2021): single-threaded scope of this value; set and
+        // removed within the test. The name is unique to this test.
+        std::env::set_var(KEY, SECRET_VALUE);
+
+        let declaration = CellDeclaration {
+            environment: vec![var(KEY, EnvSource::Secret)],
+            ..CellDeclaration::default()
+        };
+        let dir = std::env::temp_dir();
+        let cellfile = Cellfile {
+            file_directory: dir.clone(),
+            directory: dir,
+            declaration,
+        };
+
+        let plan =
+            build_execution_plan(&cellfile, "cell37", "/bin/echo", &["hi".to_string()], false)
+                .unwrap();
+        let rendered = plan.render();
+
+        std::env::remove_var(KEY);
+
+        assert_eq!(plan.secret_keys, vec![KEY.to_string()]);
+        assert!(
+            rendered.contains(&format!("--setenv {KEY} <redacted>")),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(SECRET_VALUE), "{rendered}");
+        assert!(rendered.contains("NOT run verbatim"), "{rendered}");
     }
 }
