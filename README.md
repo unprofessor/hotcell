@@ -13,7 +13,7 @@ an HTTP CONNECT proxy that allows the hostnames you list.
 - **bubblewrap** (`bwrap`) — [install](https://github.com/containers/bubblewrap)
   via your package manager (`apt install bubblewrap`, `brew install bubblewrap`,
   etc.). Required for sandbox isolation.
-- **Rust** 1.81+ — needed only to build hotcell itself.
+- **Rust** 1.95+ — needed only to build hotcell itself.
 
 ### From git
 
@@ -37,13 +37,9 @@ cargo install --path .
 
 Create a `Cellfile` in any directory:
 
-```ini
-# Cellfile
-provision.type = none
-workdir = /work
-
-# Run this cell:
-#   hotcell run -- echo hello from hotcell
+```kdl
+// Cellfile — a no-op cell with a working directory at /work
+workdir "/work"
 ```
 
 Then run a program inside it:
@@ -52,27 +48,71 @@ Then run a program inside it:
 hotcell run -- echo hello from hotcell
 ```
 
-The output shows provisioning (skipped for `type = none`) and the program's
-output. Subsequent runs reuse the provisioned state.
+The output shows provisioning (a no-op here) and the program's output.
+Subsequent runs reuse the provisioned state.
 
 ## Cellfile format
 
-A Cellfile is a plain key-value file stored as `Cellfile` in the project
-directory. Keys use dot-separated namespacing.
+A Cellfile is a [KDL v2](https://kdl.dev) document named `Cellfile` in the
+project directory. Comments start with `//`. A completely empty Cellfile is
+valid — it gives you a no-op provisioner, offline, with the default working
+directory (`/work`).
 
-| Key | Description | Example |
-| ----- | ------------- | --------- |
-| `provision.type` | Provisioner kind: `none` (no-op) or `shell` | `provision.type = shell` |
-| `provision.script` | Script path (relative to Cellfile dir) for `shell` provisioner | `provision.script = ./provision.sh` |
-| `provision.host_path` | Host files/dirs the provisioner may read (repeatable) | `provision.host_path = ~/.nvm/versions/node` |
-| `workdir` | Working directory inside the cell | `workdir = /work` |
-| `env.*` | Environment variables passed to the agent | `env.PATH = /opt/pi/bin:/usr/bin:/bin` |
-| `net.allow` | Allowed egress endpoints (`host` or `host:port`, repeatable) | `net.allow = generativelanguage.googleapis.com:443` |
-| `seed` | Source → target file mapping. **Parsed but not implemented** — no provisioner reads it | `seed = ./config.json => /app/config.json` |
-| `package` | Package to install. **Parsed but not implemented** — no provisioner reads it | `package = nodejs` |
+A worked example (a shell-provisioned cell that reaches one host):
 
-A completely empty Cellfile is valid — it gives you a no-op provisioner,
-offline, with a working directory at `/work`.
+```kdl
+workdir "/work"                          // working directory inside the cell
+
+provision "shell" script="./provision.sh" {
+    host-path "~/.nvm/versions/node"     // repeatable: a host path the
+    host-path "~/.gitconfig"             // provisioner may read, read-only
+}
+
+env PATH="/opt/node/bin:/usr/bin:/bin"   // literal value, written here
+env PI_PROVIDER                          // passthrough from hotcell's own env
+secret ANTHROPIC_API_KEY                 // passthrough, redacted in the plan
+
+net {
+    allow "api.anthropic.com" port=443   // repeatable: an allowed endpoint
+    allow "example.com"                   // port optional: any port
+}
+```
+
+The nodes:
+
+| Node | Description |
+| ---- | ----------- |
+| `workdir "DIR"` | Working directory inside the cell. Defaults to `/work`. |
+| `provision "none"` | The no-op provisioner. This is the default when no `provision` node is present. |
+| `provision "shell" script="PATH"` | Runs `PATH` (relative to the Cellfile directory) inside the sandbox to populate the cell. |
+| `host-path "PATH"` | Inside a `provision` block: a host path the provisioner may read, read-only, to bootstrap from. Repeatable. The agent itself never sees these. |
+| `env NAME="value"` | An environment variable with a literal value written in the Cellfile. Repeatable. |
+| `env NAME` | A passthrough: hotcell reads `NAME` from its own environment at run time and gives it to the agent. Repeatable. |
+| `secret NAME` | Like `env NAME`, but redacted wherever the run is printed. Repeatable. |
+| `net { allow "HOST" port=N }` | An allowed egress endpoint. `port` is optional — omit it to allow any port. Repeatable. See [Network firewall](#network-firewall). |
+
+The agent runs with a clean environment: only the variables the Cellfile
+declares reach it. Unknown nodes are errors — a typo in a security-relevant
+directive (`nett { allow ... }`) fails the run rather than being silently
+ignored.
+
+### Environment variables and secrets
+
+An `env` value can be written in the Cellfile (`env NAME="value"`) or taken
+from hotcell's own environment at run time. A bare `env NAME` is a
+**passthrough** and `secret NAME` is the same thing **redacted** — both let a
+value stay out of the Cellfile. Export it in the shell you launch hotcell from;
+if a declared passthrough or secret is **not set** in hotcell's environment,
+the run fails before any sandbox starts, rather than handing the agent a cell
+missing a variable it was promised.
+
+A `secret` differs from a passthrough only in how it is shown: it appears in
+the execution plan as `--setenv NAME <redacted>`, with a footer noting the plan
+will not run verbatim as printed — so the value stays out of terminal
+scrollback and captured logs. The resolved value still reaches the agent, but a
+passthrough or secret is **never written to cell state**: the on-disk record
+(`.cell/<name>/provisioned_as.json`) keeps only the variable's name and source,
+so a secret is not persisted and rotating it does not re-provision the cell.
 
 ## Commands
 
@@ -90,7 +130,9 @@ parses the program's flags as its own. Run `hotcell --help` or
 
 Before any sandbox starts, hotcell prints its **execution plan**: every
 `bwrap` command it will run, one flag per line, POSIX-quoted with all host
-paths absolute, so the block can be copy-pasted verbatim into a terminal.
+paths absolute, so the block can be copy-pasted verbatim into a terminal —
+unless a `secret` is declared, whose value the plan shows as `<redacted>`
+(see [Environment variables and secrets](#environment-variables-and-secrets)).
 Execution runs that same plan, argument for argument. A `[y/N]` prompt then
 gates the run — `--dry-run` prints the plan and exits, `-y` skips the
 prompt.
@@ -103,8 +145,9 @@ failed.
 hotcell's network isolation is kernel-enforced (bubblewrap's `--unshare-net`)
 plus a host-side HTTP CONNECT proxy:
 
-- **No `net.allow` entries** → the agent is fully offline. No proxy starts.
-- **One or more `net.allow` entries** → an HTTP CONNECT proxy starts on a
+- **No `net` block (or an empty one)** → the agent is fully offline. No proxy
+  starts.
+- **One or more `allow` endpoints** → an HTTP CONNECT proxy starts on a
   loopback address. The agent connects through it, and only the listed
   hostnames are reachable.
 

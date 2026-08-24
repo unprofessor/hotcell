@@ -13,11 +13,10 @@
 // provisioned rootfs. This is the permissions model: provisioner may
 // bootstrap, agent may not.
 //
-// Usage, from this directory:
+// Usage, from this directory (with your provider's API key exported in the
+// shell you run hotcell from — see the provider block below):
+//   export GOOGLE_API_KEY=...   # or ANTHROPIC_API_KEY / OPENAI_API_KEY
 //   hotcell run -- pi
-//
-// Provide an API key for your provider via the env, e.g. copy this file to
-// `Cellfile` and edit, or set the key in the `env` lines below.
 
 workdir "/work"
 
@@ -37,17 +36,20 @@ provision "shell" script="./provision.sh" {
 env PATH="/opt/pi/bin:/opt/node/bin:/usr/bin:/bin"
 env HOME="/home/agent"
 
-// Pick a provider and supply its API key. Pi defaults to google (Gemini).
-// The API key MUST be declared here — the agent runs with a clean
-// environment (only what this Cellfile declares is passed through), so a
-// key exported in your shell does NOT reach the agent by itself. Set ONE
-// provider:
+// Pick a provider and pass its API key through as a `secret`. Pi defaults to
+// google (Gemini). Set ONE provider and its matching key.
+//
+// A `secret NAME` names a variable whose value hotcell reads from ITS OWN
+// environment at run time. The key is never written in this file, is shown as
+// <redacted> in the execution plan, and is never stored in cell state. Export
+// it in the shell you run hotcell from; if it is unset, the run fails before
+// any sandbox starts.
 env PI_PROVIDER="google"
-// env GOOGLE_API_KEY="..."      // Gemini
+secret GOOGLE_API_KEY            // Gemini (google)
 // env PI_PROVIDER="anthropic"
-// env ANTHROPIC_API_KEY="..."   // Claude
+// secret ANTHROPIC_API_KEY      // Claude
 // env PI_PROVIDER="openai"
-// env OPENAI_API_KEY="..."      // GPT
+// secret OPENAI_API_KEY         // GPT
 
 // Allow egress to the model provider(s) you use. The network firewall IS
 // implemented: the cell's agent runs in an unshared-net namespace (loopback
