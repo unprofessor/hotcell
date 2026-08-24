@@ -4,7 +4,7 @@ aliases: [reject-duplicate-single-valued-nodes]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Reject duplicate single-valued Cellfile nodes
-status: review
+status: done
 assignee: null
 created: 2026-08-24
 updated: 2026-08-24
