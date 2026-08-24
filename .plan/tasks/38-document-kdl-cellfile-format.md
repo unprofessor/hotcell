@@ -4,7 +4,7 @@ aliases: [document-kdl-cellfile-format]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Document the KDL Cellfile format
-status: review
+status: done
 assignee: null
 created: 2026-08-23
 updated: 2026-08-24
