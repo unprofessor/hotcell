@@ -101,3 +101,33 @@ Manual `--dry-run` (real binary):
   `--setenv PI_PROVIDER anthropic`, footer printed, raw value never printed
   (grep for the value returned nothing), exit 0.
 - Without any secret: full passthrough value shown, no `<redacted>`, no footer.
+
+## Review
+
+- verdict: approved
+- reviewer: reviewer-agent
+- date: 2026-08-24
+
+Re-verified independently in the worktree (fresh context, did not trust the
+worker's self-report):
+
+- `cargo build`, `cargo clippy --all-targets`, `cargo test` all clean — every
+  suite green (lib 34 passed; all integration binaries 0 failed).
+- Real `hotcell run ... --dry-run` with `secret ANTHROPIC_API_KEY` set to a
+  known value: rendered `--setenv ANTHROPIC_API_KEY <redacted>`, showed
+  `--setenv PATH ...` and `--setenv PI_PROVIDER anthropic` with real values,
+  and printed the "will NOT run verbatim as shown" footer. `grep` for the raw
+  secret value in the full output returned 0 matches.
+- No-secret dry-run: passthrough shown in full, no `<redacted>`, no footer.
+- Display-only redaction confirmed at the source: `render_argument` masks only
+  the display string, while execution goes through `PlanStep::command` →
+  `isolation::collapse`, which builds the argv from the real `arg.values`. The
+  plan remains the single execution source of truth; the real value reaches the
+  sandbox unchanged.
+- Scope correct: only `src/plan.rs`, `tests/run_cellfile_grammar.rs`, and this
+  task file changed; no other `.plan/` files.
+- The updated `passthrough_and_secret_vars_resolve_from_the_host_environment`
+  test is a correct, intentional behaviour change, not a masked regression: the
+  old assertion checked that the raw secret reached `--setenv`, which is exactly
+  the leak this task removes. It now asserts redaction + absence of the raw
+  value + footer, and a new sibling test covers the no-secret path.
