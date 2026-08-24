@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use shlex::try_quote;
 
-use crate::cellfile::{Cellfile, EnvSource};
+use crate::cellfile::{Cellfile, EnvSource, EnvVar};
 use crate::isolation::{self, AgentBridge, Argument, BRIDGE_DIR};
 use crate::state;
 
@@ -169,6 +169,56 @@ fn quote_arg(s: &str) -> String {
     try_quote(s).unwrap_or(Cow::Borrowed("''")).into_owned()
 }
 
+/// Resolve declared env vars into the concrete `(key, value)` pairs the agent
+/// is launched with (`--setenv`).
+///
+/// A `Literal` value is taken verbatim from the Cellfile. A `Passthrough`
+/// (`env NAME`) or `Secret` (`secret NAME`) value is looked up in hotcell's
+/// own environment via `lookup` — never written in the Cellfile, never part
+/// of the declaration. A declared passthrough or secret that `lookup` cannot
+/// find is a hard error naming both the variable and the node that declared
+/// it (`env` versus `secret`), so a missing key fails the run outright rather
+/// than silently handing the agent a cell short a variable it was promised.
+///
+/// Resolved passthrough/secret values exist only in the returned vector: they
+/// are never stored back into `CellDeclaration`, so they cannot reach
+/// `provisioned_as.json` or the declaration comparison that decides whether a
+/// cell is stale. Rotating a secret on the host therefore does not
+/// re-provision the cell.
+///
+/// `lookup` is injected so this stays a pure function of its inputs; the real
+/// caller passes `|key| std::env::var(key).ok()`.
+fn resolve_environment(
+    environment: &[EnvVar],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>> {
+    environment
+        .iter()
+        .map(|var| {
+            let value = match &var.source {
+                EnvSource::Literal(value) => value.clone(),
+                EnvSource::Passthrough => lookup(&var.key).ok_or_else(|| {
+                    anyhow!(
+                        "env `{}`: declared as a host-environment passthrough, but `{}` \
+                         is not set in hotcell's environment",
+                        var.key,
+                        var.key
+                    )
+                })?,
+                EnvSource::Secret => lookup(&var.key).ok_or_else(|| {
+                    anyhow!(
+                        "secret `{}`: declared as a host-environment secret, but `{}` is \
+                         not set in hotcell's environment",
+                        var.key,
+                        var.key
+                    )
+                })?,
+            };
+            Ok((var.key.clone(), value))
+        })
+        .collect()
+}
+
 /// Compile the plan for a `hotcell run`. All inputs are read-only (Cellfile,
 /// cell state, provision script); nothing is created, started, or spawned.
 ///
@@ -192,30 +242,16 @@ pub fn build_execution_plan(
     } else {
         declaration.workdir.as_str()
     };
-    // Only literal values can be plumbed through today. Resolving a
-    // passthrough or a secret against the host environment is
-    // `resolve-env-passthrough-and-secrets`; until it lands, a Cellfile that
-    // declares one fails loudly here rather than handing the agent a cell
-    // that is silently missing the variable it was promised.
-    let env: Vec<(String, String)> = declaration
-        .environment
-        .iter()
-        .map(|v| match &v.source {
-            EnvSource::Literal(value) => Ok((v.key.clone(), value.clone())),
-            EnvSource::Passthrough => Err(anyhow!(
-                "env `{}`: passthrough from the host environment is not yet implemented \
-                 — declare it as `env {}=\"value\"` for now",
-                v.key,
-                v.key
-            )),
-            EnvSource::Secret => Err(anyhow!(
-                "secret `{}`: secrets are not yet implemented — declare it as \
-                 `env {}=\"value\"` for now",
-                v.key,
-                v.key
-            )),
-        })
-        .collect::<Result<_>>()?;
+    // Resolve declared env vars into the concrete key/value pairs the agent
+    // receives as `--setenv`. Literal values come from the Cellfile;
+    // passthrough and secret values are read from hotcell's OWN process
+    // environment here. A declared var missing from that environment is a
+    // hard error — raised at plan-build time, so it surfaces before the plan
+    // is displayed and before any state or directory is touched. Resolved
+    // values are returned to the caller for the agent command only; they
+    // never enter `CellDeclaration`, so they never reach `provisioned_as.json`
+    // or the declaration comparison that decides cell identity.
+    let env = resolve_environment(&declaration.environment, |key| std::env::var(key).ok())?;
 
     // Only the `shell` provisioner has a bwrap step: it runs inside the
     // sandbox. The `none` provisioner works host-side (a plain mkdir) and
@@ -274,4 +310,94 @@ pub fn build_execution_plan(
         agent,
         bridge,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cellfile::EnvVar;
+    use std::collections::HashMap;
+
+    fn var(key: &str, source: EnvSource) -> EnvVar {
+        EnvVar {
+            key: key.to_string(),
+            source,
+        }
+    }
+
+    /// A lookup backed by a fixed map, standing in for hotcell's own process
+    /// environment so these tests never depend on the real one.
+    fn lookup_from(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        move |key: &str| map.get(key).cloned()
+    }
+
+    #[test]
+    fn literal_values_pass_through_verbatim() {
+        let env = vec![var("PATH", EnvSource::Literal("/opt/bin".to_string()))];
+        let resolved = resolve_environment(&env, |_| None).unwrap();
+        assert_eq!(resolved, vec![("PATH".to_string(), "/opt/bin".to_string())]);
+    }
+
+    #[test]
+    fn passthrough_and_secret_resolve_from_the_host_environment() {
+        let env = vec![
+            var("PI_PROVIDER", EnvSource::Passthrough),
+            var("ANTHROPIC_API_KEY", EnvSource::Secret),
+            var("PATH", EnvSource::Literal("/opt/bin".to_string())),
+        ];
+        let resolved = resolve_environment(
+            &env,
+            lookup_from(&[
+                ("PI_PROVIDER", "anthropic"),
+                ("ANTHROPIC_API_KEY", "sk-secret-value"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                ("PI_PROVIDER".to_string(), "anthropic".to_string()),
+                (
+                    "ANTHROPIC_API_KEY".to_string(),
+                    "sk-secret-value".to_string()
+                ),
+                ("PATH".to_string(), "/opt/bin".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_passthrough_is_a_hard_error_naming_the_node() {
+        let env = vec![var("PI_PROVIDER", EnvSource::Passthrough)];
+        let err = resolve_environment(&env, |_| None).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("env `PI_PROVIDER`"), "{message}");
+        assert!(message.contains("not set in hotcell"), "{message}");
+    }
+
+    #[test]
+    fn a_missing_secret_is_a_hard_error_naming_the_node() {
+        let env = vec![var("ANTHROPIC_API_KEY", EnvSource::Secret)];
+        let err = resolve_environment(&env, |_| None).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("secret `ANTHROPIC_API_KEY`"), "{message}");
+        assert!(message.contains("not set in hotcell"), "{message}");
+    }
+
+    #[test]
+    fn resolution_stops_at_the_first_missing_var() {
+        // A missing var short-circuits with an error rather than silently
+        // omitting it, so no partial env ever reaches the agent.
+        let env = vec![
+            var("PRESENT", EnvSource::Passthrough),
+            var("MISSING", EnvSource::Secret),
+        ];
+        let err =
+            resolve_environment(&env, lookup_from(&[("PRESENT", "here")])).unwrap_err();
+        assert!(err.to_string().contains("secret `MISSING`"), "{err}");
+    }
 }
