@@ -1,12 +1,12 @@
 ---
 id: env-changes-should-not-reprovision
 kind: story
-parent: v1-self-hostable-hotcell
+parent: post-v1-cellfile-and-provisioning
 title: Env changes should not force re-provisioning
 status: todo
 assignee: null
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-08-24
 tags: [cellfile, provisioning]
 ---
 
@@ -44,4 +44,11 @@ Three approaches were sketched; none chosen:
 - Worth doing soon after: that story already invalidates every existing cell
   by changing the declaration shape, so a second identity change is cheap
   while few cells exist.
-- No task yet; the tech lead should pick an approach first.
+- 2026-08-24 approach chosen: **#2** (give provisioning its own declared
+  home, e.g. `provision "shell" home="..."`, so `environment` drops out of
+  cell identity cleanly). #1 is a hack around the `HOME` special case; #3
+  leaves the waste in place. No task yet — needs the grammar for the
+  provisioner `home` property, which lands with
+  [[cellfile-kdl-grammar-and-secrets]].
+- 2026-08-24 rehomed under [[post-v1-cellfile-and-provisioning]]: a caching
+  refinement, not a self-hosting blocker.

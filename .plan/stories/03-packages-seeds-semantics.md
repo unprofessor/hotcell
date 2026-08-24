@@ -1,12 +1,12 @@
 ---
 id: packages-seeds-semantics
 kind: story
-parent: v1-self-hostable-hotcell
+parent: post-v1-cellfile-and-provisioning
 title: Decide packages/seeds semantics
 status: todo
 assignee: null
 created: 2026-07-29
-updated: 2026-08-23
+updated: 2026-08-24
 tags: []
 ---
 
@@ -16,7 +16,7 @@ Decide packages/seeds semantics
 
 ## Context
 
-Parent: `v1-self-hostable-hotcell`. The Cellfile parser (`src/cellfile.rs`)
+Parent: `post-v1-cellfile-and-provisioning`. The Cellfile parser (`src/cellfile.rs`)
 parses `package =` and `seed = source => target` into `CellDeclaration`, but
 no built-in provisioner acts on them — the `shell` provisioner is expected to
 do that work itself, and `hotcell.allium` treats packages/seeds as declaration

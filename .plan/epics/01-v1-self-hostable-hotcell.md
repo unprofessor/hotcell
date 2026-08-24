@@ -5,7 +5,7 @@ title: Ship v1 self-hostable hotcell
 status: todo
 assignee: null
 created: 2026-07-29
-updated: 2026-08-23
+updated: 2026-08-24
 tags: []
 ---
 
@@ -23,11 +23,10 @@ non-empty `net.allow` policy.
 
 - Network firewall (HTTP allowlist proxy) — story `network-firewall`.
 - Polish and docs — story `polish-and-docs`.
-- Decide packages/seeds semantics — story `packages-seeds-semantics`.
 - KDL Cellfile grammar with env passthrough and secrets — story
-  `cellfile-kdl-grammar-and-secrets`.
-- Env changes should not force re-provisioning — story
-  `env-changes-should-not-reprovision`.
+  `cellfile-kdl-grammar-and-secrets`. This is where secret passthrough lands,
+  so a provider API key never leaks into the plan or cell state — part of the
+  v1 bar.
 
 ## Out of scope
 
@@ -40,5 +39,8 @@ non-empty `net.allow` policy.
 
 ## Notes
 
+- 2026-08-24 moved `packages-seeds-semantics` and
+  `env-changes-should-not-reprovision` out to
+  [[post-v1-cellfile-and-provisioning]]; neither blocks self-hosting.
 - 2026-07-29 created. Seeded from a gap analysis: `cargo build --release`
   and all 21 tests pass; the only `TODO(v1)` is `src/firewall.rs`.
