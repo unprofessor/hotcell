@@ -64,8 +64,16 @@ value FileMapping {
 }
 
 value EnvVar {
+    -- An environment variable presented to the agent. `key` names it; `source`
+    -- says where its value comes from (see EnvSource). `value` carries the
+    -- literal text and is present ONLY when source = literal. For a passthrough
+    -- or secret variable the value is resolved from hotcell's own environment
+    -- at launch (see the RunCell surfaces) and is deliberately absent here, so
+    -- a resolved passthrough or secret value never becomes part of the
+    -- declaration — and therefore never reaches provisioned_as or is_current.
     key: String
-    value: String
+    source: EnvSource
+    value: String?       -- set only when source = literal; null otherwise
 }
 
 value Provisioner {
@@ -95,6 +103,24 @@ value CellDeclaration {
 }
 
 ------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum EnvSource {
+    -- Where an environment variable's value comes from.
+    --   literal      the value is written in the Cellfile and travels with the
+    --                declaration.
+    --   passthrough  the value is NOT written in the Cellfile; the Cellfile
+    --                names the variable, and hotcell reads its value from its
+    --                own environment at launch. The resolved value never enters
+    --                the declaration.
+    --   secret       like passthrough (resolved from hotcell's environment at
+    --                launch, never written in the Cellfile), and additionally
+    --                masked as <redacted> wherever hotcell displays the run.
+    literal | passthrough | secret
+}
+
+------------------------------------------------------------
 -- Entities and Variants
 ------------------------------------------------------------
 
@@ -109,8 +135,12 @@ entity Cell {
     sessions: Session with cell = this
     active_sessions: sessions where status = running
 
-    -- The declaration the cell was last provisioned with — i.e. the
-    -- environment the agent actually sees. Set when provisioning succeeds.
+    -- The declaration the cell was last provisioned with. Set when
+    -- provisioning succeeds. Because a passthrough or secret EnvVar carries no
+    -- value (see EnvVar), a resolved passthrough or secret value is never
+    -- recorded here — only the variable's key and source are. A secret's
+    -- resolved value existing in no stored field is a guarantee, not an
+    -- implementation detail.
     provisioned_as: CellDeclaration when status = provisioned
 
     -- A fingerprint of the provisioner's script content, recorded at
@@ -130,7 +160,10 @@ entity Cell {
 
     -- True (fresh) when the provisioned environment matches the Cellfile's
     -- current declaration. False (stale) when the Cellfile has changed since
-    -- the last provisioning.
+    -- the last provisioning. Comparison is over declarations, which record only
+    -- an EnvVar's key and source (never a resolved passthrough or secret
+    -- value), so changing the value of a host secret or passthrough variable
+    -- between runs does NOT make a cell stale and does not force a re-provision.
     is_current: provisioned_as = cellfile.declaration
 
     -- True when the provisioner's inputs are the same as when the cell was
@@ -361,8 +394,21 @@ surface Cleanroom {
         -- default. A cell with no allowed endpoints has no network access.
 
     @guarantee CleanEnvironment
-        -- Only declared packages and seeded files are present when a
-        -- session starts. No host state leaks into the sandbox.
+        -- Only declared packages, seeded files and declared environment
+        -- variables are present when a session starts. No host state leaks in
+        -- except through the environment variables the Cellfile explicitly
+        -- declares: a passthrough (source = passthrough) or secret
+        -- (source = secret) variable is a deliberate, opt-in channel for one
+        -- named value from hotcell's own environment. Nothing undeclared
+        -- crosses into the sandbox.
+
+    @guarantee EnvironmentResolvedAtLaunch
+        -- The agent's environment is the declared EnvVars resolved to concrete
+        -- values at launch: a literal contributes its own value, while a
+        -- passthrough or secret contributes the value read from hotcell's
+        -- environment at that moment. These resolved values are handed to the
+        -- agent only; they are never written back into the declaration, so they
+        -- cannot reach provisioned_as or influence is_current.
 }
 
 -- The developer's view, scoped to the Cellfile in their current working
@@ -402,6 +448,21 @@ surface DeveloperCLI {
         -- During provisioning, hotcell logs progress and errors to the console.
         -- If provisioning fails, the error is shown on the console and no session
         -- starts.
+
+    @guarantee DeclaredVariableMustResolve
+        -- A passthrough or secret variable that is declared but absent from
+        -- hotcell's own environment at launch is a hard error: hotcell reports
+        -- which variable is missing and aborts the run before any session
+        -- starts, rather than handing the agent a cell short a variable it was
+        -- promised. A literal always resolves (its value is in the Cellfile).
+
+    @guarantee SecretsRedactedInRunOutput
+        -- Wherever hotcell displays a run to the developer (the execution plan,
+        -- including a dry run), a variable declared with source = secret is
+        -- shown with its value masked as <redacted>. A passthrough is not
+        -- masked, so the developer can still see what the agent receives.
+        -- Redaction is keyed off the declared secret source, not a guess from
+        -- the variable's name.
 
     @guarantee SessionLogsToFile
         -- Once the agent starts, hotcell redirects its own logging to a file and
