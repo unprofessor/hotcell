@@ -112,3 +112,43 @@ Per acceptance criterion:
 
 - **`cargo test` and `cargo clippy --all-targets` pass.** Both clean (see
   above).
+
+## Review
+
+verdict: approved
+reviewer: reviewer-agent
+date: 2026-08-24
+
+Re-verified independently in the worktree, not trusting the worker's notes.
+
+- `cargo build`, `cargo clippy --all-targets` (forced rebuild via `touch
+  src/plan.rs`), and `cargo test` all clean: 26 unit + integration suites, 0
+  failed. New tests present and green: `plan::tests::*` (4),
+  `run_cellfile_grammar::{passthrough_and_secret_vars_resolve_from_the_host_environment,
+  a_missing_passthrough_is_a_hard_error, a_missing_secret_is_a_hard_error}`,
+  `run_env_secrets::{a_resolved_secret_value_is_absent_from_the_state_file,
+  changing_a_secret_value_does_not_reprovision}`.
+
+- Manual `--dry-run` with a controlled env (Cellfile `env MY_PASS` + `secret
+  MY_SECRET`): with both set, plan emits `--setenv MY_PASS passval` and
+  `--setenv MY_SECRET topsecret123`, exit 0. With `MY_SECRET` unset: hard
+  error "secret `MY_SECRET`: ... not set in hotcell's environment", exit 1,
+  and NO `.cell` directory created — failure precedes any state/dir. (env
+  passthrough missing-case covered by the integration test above.)
+
+- Manual real run (`-y`, shell provisioner): `provisioned_as.json` records
+  only `{"key":"MY_SECRET","source":"Secret"}` — grep for the actual value
+  `ABC-111` returns 0 matches. A second run with a different value
+  (`XYZ-999`) reports `provisioning: skipped`, confirming the secret is not
+  part of cell identity.
+
+- Security property holds by construction: `resolve_environment` returns a
+  separate `Vec<(String,String)>` for `--setenv` and never writes back to
+  `CellDeclaration`; `EnvSource::Secret`/`Passthrough` carry no value.
+  Ordering in `cli.rs::run_cell` confirmed: `load_cell` (read-only, creates
+  nothing) → `build_execution_plan` (resolution here) → `render` → dry-run
+  exit → confirm → `begin_provisioning` (first dir creation).
+
+- Scope clean: only the task file, `src/plan.rs`, `tests/run_cellfile_grammar.rs`,
+  and new `tests/run_env_secrets.rs` touched. No other `.plan/` files. Example
+  Cellfile deliberately left for `document-kdl-cellfile-format`, as noted.
