@@ -136,3 +136,51 @@ Module doc updated to state that annotations are errors.
 - `env_with_two_bare_names_says_one_at_a_time` — the mirror case.
 - `a_v1_cellfile_leads_with_the_migration_hint` — asserts the hint is the
   first line of the error.
+
+## Review
+
+verdict: approved
+reviewer: reviewer-agent
+date: 2026-08-24
+
+Re-verified all four findings independently in a fresh context, reproducing
+each at the CLI (`hotcell -f <file> status`), not just trusting the worker's
+notes.
+
+- **Finding 1 (stale comment).** `src/provisioning.rs:272-275` now reads
+  ``declared as the `script` property of the `provision` node
+  (`provision "shell" script="./provision.sh"`)``. `grep -rnE
+  'provision\.(script|type|host_path)|net\.allow|env\.' src/` returns only
+  hits inside the `V1_KEYS`/`env.`-prefix old-format detector and the v1 test
+  fixtures — all intentional old-format literals, as the acceptance criterion
+  permits.
+- **Finding 2 (annotations).** `(ty)workdir "/x"` →
+  `Cellfile:1:2: type annotation `(ty)` on `workdir` is not supported`;
+  `workdir (ty)"/x"` → `Cellfile:1:10: … on a value of `workdir` …`. Both are
+  source-located errors, located at the annotation. `net { allow "h"
+  port=(u8)80 }` is likewise rejected.
+- **Finding 3 (env message).** `env FOO="a" BAR="b"` →
+  ``declares one variable at a time; got 2 `NAME="value"` properties``;
+  `env FOO BAR` → ``passes through one variable at a time; got 2 bare names``.
+  Crucially, `env FOO BAR="b"` (genuine arg+prop) still gives the original
+  "…not both" message, so the new arms did not swallow that case.
+- **Finding 4 (hint ordering).** A v1 `key = value` file now leads with the
+  migration hint; the five raw KDL diagnostics follow it.
+
+Checks run in the worktree:
+- `cargo fmt --all -- --check` — clean.
+- `RUSTFLAGS="-D warnings" cargo clippy --all-targets --all-features` — clean.
+- `cargo test` — 72 passed, 0 failed. The bin's `cellfile::tests` module has
+  all five new regression tests present and passing, each asserting the error
+  text (and finding 3's tests asserting "not both" is absent).
+
+Scope confirmed via `git diff main...HEAD` (three-dot; `main` has advanced past
+the branch point): only `src/cellfile.rs`, `src/provisioning.rs`, and this task
+file changed. No other `.plan/` files, and no duplicate-node handling was
+touched (that sibling task is already merged to `main`).
+
+Non-blocking note for the leader: this branch was cut from `553d9a6` and is
+behind `main`, which now carries `reject-duplicate-single-valued-nodes` and
+`resolve-env-passthrough-and-secrets` — both of which also edit
+`src/cellfile.rs`. Expect to rebase/merge and resolve conflicts in that file
+before landing; the task work itself is correct and complete.
