@@ -138,3 +138,36 @@ again here; first declared at <path>/Cellfile:1:1
   `decl.network.allowed_endpoints`. Endpoints from both blocks survived, so
   no `allow` child was lost — but the merge was still an unstated guess, and
   is now rejected for consistency with the fail-closed grammar.
+
+## Review
+verdict: approved
+reviewer: reviewer-agent
+date: 2026-08-24
+
+Re-verified independently in a fresh worktree.
+
+- Diff scope: only `src/cellfile.rs`, `tests/run_cellfile_grammar.rs`, and this
+  task file changed (`git diff main..HEAD --name-only`). No other .plan/ files
+  touched. No scope creep.
+- `cargo build`: clean. `cargo fmt --check`: clean.
+  `RUSTFLAGS="-D warnings" cargo clippy --all-targets --all-features`: no
+  warnings. `cargo test`: all binaries green (main unit tests 25 passed;
+  run_cellfile_grammar 6 passed; 0 failed across the suite).
+- New tests all ran and passed: `duplicate_workdir_is_an_error_citing_both`,
+  `duplicate_provision_is_an_error_citing_both`,
+  `duplicate_net_is_an_error_citing_both`, `multi_valued_nodes_still_accumulate`,
+  and integration `a_duplicate_single_valued_node_fails_and_creates_no_state`.
+- Manual CLI reproduction (`hotcell run --dry-run`) from a tempdir:
+  - Duplicate `provision`: exit 1, error
+    `Cellfile:2:1: `+"`provision`"+` may be declared only once, but is declared
+    again here; first declared at .../Cellfile:1:1`; no `.cell` dir created.
+  - Duplicate `workdir` and duplicate `net`: same located, both-cited error
+    shape (second occurrence in the `path:line:col:` prefix, first cited in the
+    message).
+  - A valid Cellfile with two `env`, two `host-path`, and two `allow` children
+    parses and produces a full plan; both `env FOO` and `env BAR` reach the
+    agent (`--setenv FOO 1` / `--setenv BAR 2`), confirming multi-valued nodes
+    still accumulate.
+- Error quality is good: names the offending node, points at the duplicate, and
+  cites the first declaration's line:col via stored byte offset + `line_column`.
+- Every ## Acceptance criterion genuinely met.
