@@ -4,7 +4,7 @@ aliases: [redact-secrets-in-execution-plan]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Redact secrets in the rendered execution plan
-status: review
+status: done
 assignee: null
 created: 2026-08-23
 updated: 2026-08-24
