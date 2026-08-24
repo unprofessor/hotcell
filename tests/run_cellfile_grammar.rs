@@ -61,8 +61,11 @@ fn a_v1_cellfile_reports_the_format_change() {
     assert!(stderr.contains("Cellfile:1:"), "stderr: {stderr}");
 }
 
-/// A passthrough (`env NAME`) and a secret (`secret NAME`) resolve from
-/// hotcell's own environment and reach the agent as `--setenv`.
+/// A passthrough (`env NAME`) resolves from hotcell's own environment and
+/// reaches the agent as `--setenv` with its real value — it is not secret, so
+/// hiding it would obscure what the agent receives. A secret (`secret NAME`)
+/// also resolves, but the rendered plan shows its value as `<redacted>` and
+/// never prints the real value; the plan carries the redaction footer.
 #[test]
 fn passthrough_and_secret_vars_resolve_from_the_host_environment() {
     let (success, stderr) = plan_with_cellfile_env(
@@ -76,11 +79,43 @@ fn passthrough_and_secret_vars_resolve_from_the_host_environment() {
     assert!(success, "stderr: {stderr}");
     assert!(
         stderr.contains("--setenv PI_PROVIDER anthropic"),
-        "passthrough must reach --setenv: {stderr}"
+        "passthrough must reach --setenv with its real value: {stderr}"
     );
+    // The secret var is visibly passed, but redacted...
     assert!(
-        stderr.contains("--setenv HOTCELL_TEST_SECRET sk-from-host-env"),
-        "secret must reach --setenv: {stderr}"
+        stderr.contains("--setenv HOTCELL_TEST_SECRET <redacted>"),
+        "secret must reach --setenv redacted: {stderr}"
+    );
+    // ...and its real value must appear nowhere in the rendered plan.
+    assert!(
+        !stderr.contains("sk-from-host-env"),
+        "secret value must never be printed: {stderr}"
+    );
+    // A secret is present, so the plan warns it will not run verbatim.
+    assert!(
+        stderr.contains("will NOT run verbatim as shown"),
+        "redaction footer must be present: {stderr}"
+    );
+}
+
+/// With no `secret` declared, the plan runs verbatim: every value shows in
+/// full and there is no redaction footer.
+#[test]
+fn a_plan_without_secrets_shows_every_value_and_no_footer() {
+    let (success, stderr) = plan_with_cellfile_env(
+        "workdir \"/work\"\nenv PI_PROVIDER\n",
+        &[("PI_PROVIDER", "anthropic")],
+        &[],
+    );
+    assert!(success, "stderr: {stderr}");
+    assert!(
+        stderr.contains("--setenv PI_PROVIDER anthropic"),
+        "passthrough value must show in full: {stderr}"
+    );
+    assert!(!stderr.contains("<redacted>"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("will NOT run verbatim"),
+        "no footer without a secret: {stderr}"
     );
 }
 
