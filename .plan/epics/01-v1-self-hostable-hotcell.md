@@ -2,7 +2,7 @@
 id: v1-self-hostable-hotcell
 kind: epic
 title: Ship v1 self-hostable hotcell
-status: todo
+status: done
 assignee: null
 created: 2026-07-29
 updated: 2026-08-24
