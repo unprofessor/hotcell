@@ -4,10 +4,10 @@ aliases: [resolve-env-passthrough-and-secrets]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Resolve passthrough and secret env vars at launch
-status: todo
+status: in_progress
 assignee: null
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-08-24
 tags: [cellfile, secrets, plan]
 depends_on: [replace-cellfile-parser-with-kdl]
 ---
