@@ -4,10 +4,10 @@ aliases: [realign-allium-spec-with-env-sources]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Realign hotcell.allium with the env source model
-status: todo
+status: in_progress
 assignee: null
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-08-24
 tags: [spec, allium, secrets]
 depends_on: [replace-cellfile-parser-with-kdl, resolve-env-passthrough-and-secrets, redact-secrets-in-execution-plan]
 ---
