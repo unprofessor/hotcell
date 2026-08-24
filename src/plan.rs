@@ -441,8 +441,7 @@ mod tests {
             var("PRESENT", EnvSource::Passthrough),
             var("MISSING", EnvSource::Secret),
         ];
-        let err =
-            resolve_environment(&env, lookup_from(&[("PRESENT", "here")])).unwrap_err();
+        let err = resolve_environment(&env, lookup_from(&[("PRESENT", "here")])).unwrap_err();
         assert!(err.to_string().contains("secret `MISSING`"), "{err}");
     }
 

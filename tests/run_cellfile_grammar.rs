@@ -22,11 +22,7 @@ fn plan_with_cellfile(content: &str) -> (bool, String) {
 /// As [`plan_with_cellfile`], but with control over hotcell's own environment:
 /// `set` names vars to set (and their values), `remove` names vars to unset,
 /// so a test can decide exactly which passthrough/secret keys resolve.
-fn plan_with_cellfile_env(
-    content: &str,
-    set: &[(&str, &str)],
-    remove: &[&str],
-) -> (bool, String) {
+fn plan_with_cellfile_env(content: &str, set: &[(&str, &str)], remove: &[&str]) -> (bool, String) {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("Cellfile"), content).expect("write Cellfile");
     let mut command = Command::new(hotcell_bin());
@@ -124,9 +120,15 @@ fn a_plan_without_secrets_shows_every_value_and_no_footer() {
 /// under `--dry-run`, before the plan is displayed or any state is touched.
 #[test]
 fn a_missing_passthrough_is_a_hard_error() {
-    let (success, stderr) =
-        plan_with_cellfile_env("workdir \"/work\"\nenv PI_PROVIDER\n", &[], &["PI_PROVIDER"]);
-    assert!(!success, "a missing passthrough must fail the run: {stderr}");
+    let (success, stderr) = plan_with_cellfile_env(
+        "workdir \"/work\"\nenv PI_PROVIDER\n",
+        &[],
+        &["PI_PROVIDER"],
+    );
+    assert!(
+        !success,
+        "a missing passthrough must fail the run: {stderr}"
+    );
     assert!(
         stderr.contains("env `PI_PROVIDER`") && stderr.contains("not set in hotcell"),
         "stderr: {stderr}"
