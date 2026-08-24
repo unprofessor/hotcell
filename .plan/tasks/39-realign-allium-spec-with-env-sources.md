@@ -171,3 +171,59 @@ own task file and the spec, so no tickets are created here.
   hard error (`src/plan.rs:207-256,288`), non-persistence into `provisioned_as`
   / `is_current` (`src/plan.rs:286-296`, `src/cell.rs:85-86`), and secret
   redaction to `<redacted>` (`src/plan.rs:80-121,179,296`).
+
+## Review
+
+verdict: approved
+reviewer: David Allen
+date: 2026-08-24
+
+Reviewed in fresh context; every spec claim re-verified against the code, not
+the worker's notes.
+
+Checks run:
+- `git diff main...HEAD --stat` — scope is exactly two files: `hotcell.allium`
+  and this task file. No code touched. Good.
+- `allium check hotcell.allium` — 0 errors. 8 warnings + 5 info, and the
+  message set (line numbers stripped) is byte-identical to the `main` baseline
+  (`git show main:hotcell.allium`). No new `EnvVar`/`EnvSource` diagnostics; the
+  new `source`/`value` fields and `enum EnvSource` all resolve and are
+  referenced.
+- `cargo test` — all suites green, 0 failed (39 lib tests + integration
+  binaries).
+
+Spec-vs-code verification (opened the files):
+- `EnvVar` is `{ key, source: EnvSource }` with `EnvSource = Literal(String) |
+  Passthrough | Secret` (`src/cellfile.rs:90-106`). Spec models this as a
+  payload-free `enum EnvSource { literal | passthrough | secret }` plus
+  `value: String?` present only for literal — the correct Allium idiom for a
+  Rust enum carrying data on one variant; the doc comment states the invariant.
+- Launch-time resolution + missing-var hard error confirmed in
+  `resolve_environment` and `build_execution_plan` (`src/plan.rs:207-256,286`):
+  passthrough/secret read from hotcell's own env; a missing declared var errors
+  (naming the var and `env`/`secret` node) at plan-build, before any state or
+  directory is touched. Matches `DeclaredVariableMustResolve`.
+- Non-persistence confirmed: resolved values live only in the returned vector /
+  agent `--setenv` args; never written into `CellDeclaration`. `is_current`
+  (`src/cell.rs:85-86`) compares whole declarations, which hold only key+source,
+  so rotating a host secret does not make a cell stale. Matches the
+  `provisioned_as`/`is_current` comments and `EnvironmentResolvedAtLaunch`.
+- Redaction confirmed keyed off the declared `Secret` source, not a name
+  heuristic: `secret_keys` is built by `filter(EnvSource::Secret)` and
+  `render_argument` masks matching `--setenv` values as `<redacted>`
+  (`src/plan.rs:80-121,179-196`). Passthrough is not masked. Matches
+  `SecretsRedactedInRunOutput`.
+- No overclaiming: the "value in no stored field" guarantee is scoped to the
+  persisted declaration (provisioned_as/is_current) and does not claim the
+  value never exists in memory or never reaches the agent; redaction is scoped
+  to displayed run output, not "never printed anywhere". Both are accurate.
+- No syntax drift: spec contains no KDL grammar (`env NAME`/`secret NAME`/
+  `.kdl`/`node`); the `Excludes` list still carries "Cellfile format and
+  parsing (implementation detail)". Correct.
+
+Pre-existing findings spot-checked: `script` vs `shell` confirmed against
+`src/provisioning.rs:87-99,131-134` and `src/state.rs:30` — code accepts `none`
+(default) + `shell`, rejects `script`. Genuinely pre-existing (untouched by this
+diff) and correctly left for the leader to ticket; none fixed here.
+
+All ## Acceptance criteria genuinely met.
