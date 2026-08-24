@@ -9,7 +9,7 @@ assignee: null
 created: 2026-08-23
 updated: 2026-08-23
 tags: [docs, cellfile]
-depends_on: [replace-cellfile-parser-with-kdl]
+depends_on: [replace-cellfile-parser-with-kdl, resolve-env-passthrough-and-secrets, redact-secrets-in-execution-plan]
 ---
 
 ## Goal
