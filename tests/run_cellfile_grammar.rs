@@ -16,13 +16,30 @@ fn hotcell_bin() -> String {
 /// Write `content` as a Cellfile in a fresh temp dir, plan a run against it,
 /// and return `(success, stderr)`.
 fn plan_with_cellfile(content: &str) -> (bool, String) {
+    plan_with_cellfile_env(content, &[], &[])
+}
+
+/// As [`plan_with_cellfile`], but with control over hotcell's own environment:
+/// `set` names vars to set (and their values), `remove` names vars to unset,
+/// so a test can decide exactly which passthrough/secret keys resolve.
+fn plan_with_cellfile_env(
+    content: &str,
+    set: &[(&str, &str)],
+    remove: &[&str],
+) -> (bool, String) {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("Cellfile"), content).expect("write Cellfile");
-    let output = Command::new(hotcell_bin())
+    let mut command = Command::new(hotcell_bin());
+    command
         .current_dir(dir.path())
-        .args(["run", "--dry-run", "--", "/bin/true"])
-        .output()
-        .expect("run hotcell");
+        .args(["run", "--dry-run", "--", "/bin/true"]);
+    for (key, value) in set {
+        command.env(key, value);
+    }
+    for key in remove {
+        command.env_remove(key);
+    }
+    let output = command.output().expect("run hotcell");
     (
         output.status.success(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -44,22 +61,55 @@ fn a_v1_cellfile_reports_the_format_change() {
     assert!(stderr.contains("Cellfile:1:"), "stderr: {stderr}");
 }
 
-/// The parser records passthrough and secret vars, but nothing resolves them
-/// yet. Rather than hand the agent a cell silently missing a variable it was
-/// promised, the run fails and says so.
+/// A passthrough (`env NAME`) and a secret (`secret NAME`) resolve from
+/// hotcell's own environment and reach the agent as `--setenv`.
 #[test]
-fn passthrough_and_secret_vars_are_not_yet_resolved() {
-    let (success, stderr) = plan_with_cellfile("workdir \"/work\"\nenv PI_PROVIDER\n");
-    assert!(!success, "stderr: {stderr}");
+fn passthrough_and_secret_vars_resolve_from_the_host_environment() {
+    let (success, stderr) = plan_with_cellfile_env(
+        "workdir \"/work\"\nenv PI_PROVIDER\nsecret HOTCELL_TEST_SECRET\n",
+        &[
+            ("PI_PROVIDER", "anthropic"),
+            ("HOTCELL_TEST_SECRET", "sk-from-host-env"),
+        ],
+        &[],
+    );
+    assert!(success, "stderr: {stderr}");
     assert!(
-        stderr.contains("env `PI_PROVIDER`") && stderr.contains("not yet implemented"),
+        stderr.contains("--setenv PI_PROVIDER anthropic"),
+        "passthrough must reach --setenv: {stderr}"
+    );
+    assert!(
+        stderr.contains("--setenv HOTCELL_TEST_SECRET sk-from-host-env"),
+        "secret must reach --setenv: {stderr}"
+    );
+}
+
+/// A declared passthrough absent from hotcell's environment is a hard error
+/// naming the variable and its `env` node — no silent omission — and it fails
+/// under `--dry-run`, before the plan is displayed or any state is touched.
+#[test]
+fn a_missing_passthrough_is_a_hard_error() {
+    let (success, stderr) =
+        plan_with_cellfile_env("workdir \"/work\"\nenv PI_PROVIDER\n", &[], &["PI_PROVIDER"]);
+    assert!(!success, "a missing passthrough must fail the run: {stderr}");
+    assert!(
+        stderr.contains("env `PI_PROVIDER`") && stderr.contains("not set in hotcell"),
         "stderr: {stderr}"
     );
+}
 
-    let (success, stderr) = plan_with_cellfile("workdir \"/work\"\nsecret ANTHROPIC_API_KEY\n");
-    assert!(!success, "stderr: {stderr}");
+/// A declared secret absent from hotcell's environment is a hard error naming
+/// the variable and its `secret` node, and fails under `--dry-run` too.
+#[test]
+fn a_missing_secret_is_a_hard_error() {
+    let (success, stderr) = plan_with_cellfile_env(
+        "workdir \"/work\"\nsecret ANTHROPIC_API_KEY\n",
+        &[],
+        &["ANTHROPIC_API_KEY"],
+    );
+    assert!(!success, "a missing secret must fail the run: {stderr}");
     assert!(
-        stderr.contains("secret `ANTHROPIC_API_KEY`") && stderr.contains("not yet implemented"),
+        stderr.contains("secret `ANTHROPIC_API_KEY`") && stderr.contains("not set in hotcell"),
         "stderr: {stderr}"
     );
 }
