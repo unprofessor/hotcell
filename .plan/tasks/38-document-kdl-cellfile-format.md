@@ -4,7 +4,7 @@ aliases: [document-kdl-cellfile-format]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Document the KDL Cellfile format
-status: in_progress
+status: review
 assignee: null
 created: 2026-08-23
 updated: 2026-08-24
@@ -30,25 +30,24 @@ it, and no status or roadmap content.
 
 ## Acceptance
 
-- [~] The Cellfile reference documents the KDL grammar, including both `env`
-  shapes and `secret`, with a worked example that has actually been run.
-  PARTIAL: `workdir`, `provision`/`host-path`, literal `env NAME="value"`, and
-  `net`/`allow`/`port` are documented and each example was run. The `env NAME`
-  passthrough and `secret` shapes are NOT documented — see the blocker note.
+- [x] The Cellfile reference documents the KDL grammar, including both `env`
+  shapes (literal `env NAME="value"` and passthrough `env NAME`) and
+  `secret NAME`, with a worked example that has actually been run.
 - [x] `package` and `seed` are gone from the reference, not marked as
   unimplemented.
 - [x] The endpoint form is `allow "host" port=443`; no `host:port` string.
 - [x] Prerequisites state Rust 1.95+.
-- [ ] The secrets behaviour is described where a user acts on it: values come
-  from hotcell's environment, are redacted in the plan, are never written to
-  cell state, and a missing one is an error. BLOCKED — none of this is true in
-  the code yet (see blocker note); documenting it would be a false claim.
-- [ ] `examples/pi-bootstrap/Cellfile` comments no longer tell the user to
-  paste an API key into the file. BLOCKED — the only working env mechanism is
-  the literal `env KEY="value"` the story is trying to retire; the `secret`
-  replacement aborts at runtime.
-- [x] Every command and Cellfile in the README has been executed as written
-  (for everything documented — see the Validation section).
+- [x] The secrets behaviour is described where a user acts on it (new
+  "Environment variables and secrets" subsection): values come from hotcell's
+  environment, a secret is shown as `<redacted>` in the plan with a footer that
+  the block won't run verbatim, a missing declared var is a hard error before
+  any state, and resolved values are never written to cell state.
+- [x] `examples/pi-bootstrap/Cellfile` uses `secret GOOGLE_API_KEY` (the
+  default provider's key, with `secret ANTHROPIC_API_KEY` / `secret
+  OPENAI_API_KEY` as commented alternatives) instead of a literal
+  `env KEY="value"`, and the "paste your key here" leak warning is gone.
+- [x] Every command and Cellfile in the README (and the example) has been
+  executed as written — see the Validation section.
 
 ## Notes
 
@@ -70,6 +69,13 @@ it, and no status or roadmap content.
   secrets documentation must wait until those two tasks land. Recommend the
   leader sequence them first, then re-dispatch the secrets portion of this
   task. Left `status: in_progress` for this reason.
+- 2026-08-24 BLOCKER CLEARED: the leader rebased this branch onto main with
+  [[resolve-env-passthrough-and-secrets]] and
+  [[redact-secrets-in-execution-plan]] merged. Rebuilt and verified live that
+  both `env` shapes and `secret` now work; added the passthrough/secret docs, a
+  new "Environment variables and secrets" README subsection, and the
+  `examples/pi-bootstrap/Cellfile` `secret` fix. All acceptance boxes now met;
+  status set to `review`. See the extended Validation below.
 
 ## Validation
 
@@ -97,9 +103,34 @@ against it. bwrap 0.11.2 present.
   `env.`, `provision.type`, `1.81`, or `key = value` remain (only the unrelated
   "package manager" phrase in the bubblewrap install line).
 
-NOT validated because unimplemented (see blocker note): `env NAME` passthrough
-and `secret NAME`. Verified they abort rather than work — a `Cellfile` with
-`env PI_PROVIDER` fails with "passthrough from the host environment is not yet
-implemented" and one with `secret ANTHROPIC_API_KEY` fails with "secrets are
-not yet implemented", both under `hotcell run --dry-run`. Neither is documented
-in the README.
+Secrets validation (2026-08-24, after the rebase; rebuilt binary). Every one
+run live, secret value `sk-supersecret-123` / `sk-secret-xyz` / fake keys:
+
+- **Passthrough resolves**: `env PI_PROVIDER` with `PI_PROVIDER=google` in
+  hotcell's env → plan shows `--setenv PI_PROVIDER google`.
+- **Secret redacts**: `secret ANTHROPIC_API_KEY` with the var set → plan shows
+  `--setenv ANTHROPIC_API_KEY <redacted>` plus the footer "a declared secret is
+  shown as <redacted>: this block will NOT run verbatim as shown …". The real
+  value appears **0 times** in the whole plan output.
+- **Missing declared var is a hard error before any state**: unsetting the var
+  gives `Error: secret \`ANTHROPIC_API_KEY\`: declared as a host-environment
+  secret, but \`ANTHROPIC_API_KEY\` is not set in hotcell's environment` (and
+  the analogous passthrough message); no `.cell/` directory is created.
+- **Never written to cell state**: after a real `hotcell run -y`,
+  `.cell/default/provisioned_as.json` records only
+  `{ "key": "ANTHROPIC_API_KEY", "source": "Secret" }` /
+  `{ "key": "PI_PROVIDER", "source": "Passthrough" }` — the value appears **0
+  times** anywhere under `.cell/`.
+- **README worked example** (now including `env PI_PROVIDER` and
+  `secret ANTHROPIC_API_KEY`) run as written with both vars set: literal PATH,
+  `PI_PROVIDER anthropic`, `ANTHROPIC_API_KEY <redacted>`, footer present,
+  value leaked 0 times.
+- **`examples/pi-bootstrap/Cellfile`**: `hotcell run --dry-run -- pi` from the
+  example directory with `GOOGLE_API_KEY` exported → `--setenv PI_PROVIDER
+  google`, `--setenv GOOGLE_API_KEY <redacted>`, footer present, value leaked 0
+  times; the four declared `host-path`s all exist locally. With `GOOGLE_API_KEY`
+  unset it errors before any sandbox starts and creates no `.cell/`.
+
+All README examples were also re-run against the rebased binary (quick-start
+real run, empty Cellfile, `status`, `--name scratch`, `--dry-run -- pi`,
+`--help`, `run --help`, `destroy`) — all behave as documented.

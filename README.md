@@ -68,7 +68,9 @@ provision "shell" script="./provision.sh" {
     host-path "~/.gitconfig"             // provisioner may read, read-only
 }
 
-env PATH="/opt/node/bin:/usr/bin:/bin"   // an environment variable
+env PATH="/opt/node/bin:/usr/bin:/bin"   // literal value, written here
+env PI_PROVIDER                          // passthrough from hotcell's own env
+secret ANTHROPIC_API_KEY                 // passthrough, redacted in the plan
 
 net {
     allow "api.anthropic.com" port=443   // repeatable: an allowed endpoint
@@ -84,13 +86,33 @@ The nodes:
 | `provision "none"` | The no-op provisioner. This is the default when no `provision` node is present. |
 | `provision "shell" script="PATH"` | Runs `PATH` (relative to the Cellfile directory) inside the sandbox to populate the cell. |
 | `host-path "PATH"` | Inside a `provision` block: a host path the provisioner may read, read-only, to bootstrap from. Repeatable. The agent itself never sees these. |
-| `env NAME="value"` | An environment variable given to the agent. Repeatable. |
+| `env NAME="value"` | An environment variable with a literal value written in the Cellfile. Repeatable. |
+| `env NAME` | A passthrough: hotcell reads `NAME` from its own environment at run time and gives it to the agent. Repeatable. |
+| `secret NAME` | Like `env NAME`, but redacted wherever the run is printed. Repeatable. |
 | `net { allow "HOST" port=N }` | An allowed egress endpoint. `port` is optional — omit it to allow any port. Repeatable. See [Network firewall](#network-firewall). |
 
 The agent runs with a clean environment: only the variables the Cellfile
 declares reach it. Unknown nodes are errors — a typo in a security-relevant
 directive (`nett { allow ... }`) fails the run rather than being silently
 ignored.
+
+### Environment variables and secrets
+
+An `env` value can be written in the Cellfile (`env NAME="value"`) or taken
+from hotcell's own environment at run time. A bare `env NAME` is a
+**passthrough** and `secret NAME` is the same thing **redacted** — both let a
+value stay out of the Cellfile. Export it in the shell you launch hotcell from;
+if a declared passthrough or secret is **not set** in hotcell's environment,
+the run fails before any sandbox starts, rather than handing the agent a cell
+missing a variable it was promised.
+
+A `secret` differs from a passthrough only in how it is shown: it appears in
+the execution plan as `--setenv NAME <redacted>`, with a footer noting the plan
+will not run verbatim as printed — so the value stays out of terminal
+scrollback and captured logs. The resolved value still reaches the agent, but a
+passthrough or secret is **never written to cell state**: the on-disk record
+(`.cell/<name>/provisioned_as.json`) keeps only the variable's name and source,
+so a secret is not persisted and rotating it does not re-provision the cell.
 
 ## Commands
 
@@ -108,7 +130,9 @@ parses the program's flags as its own. Run `hotcell --help` or
 
 Before any sandbox starts, hotcell prints its **execution plan**: every
 `bwrap` command it will run, one flag per line, POSIX-quoted with all host
-paths absolute, so the block can be copy-pasted verbatim into a terminal.
+paths absolute, so the block can be copy-pasted verbatim into a terminal —
+unless a `secret` is declared, whose value the plan shows as `<redacted>`
+(see [Environment variables and secrets](#environment-variables-and-secrets)).
 Execution runs that same plan, argument for argument. A `[y/N]` prompt then
 gates the run — `--dry-run` prints the plan and exits, `-y` skips the
 prompt.
