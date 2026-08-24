@@ -134,3 +134,68 @@ run live, secret value `sk-supersecret-123` / `sk-secret-xyz` / fake keys:
 All README examples were also re-run against the rebased binary (quick-start
 real run, empty Cellfile, `status`, `--name scratch`, `--dry-run -- pi`,
 `--help`, `run --help`, `destroy`) — all behave as documented.
+
+## Review
+
+verdict: approved
+reviewer: reviewer-agent
+date: 2026-08-24
+
+Independent verification in a fresh worktree checkout, binary rebuilt with
+`cargo build` (bwrap 1.x present). Every acceptance item re-checked by running
+commands, not just reading prose.
+
+Examples run and results:
+
+- **Quick start** (`workdir "/work"` Cellfile, `hotcell run -y -- echo hello
+  from hotcell`): prints `hello from hotcell`; plan carries `--clearenv` and no
+  proxy — confirms the clean-env and offline claims.
+- **README worked example** (literal `env PATH=...`, passthrough `env
+  PI_PROVIDER`, `secret ANTHROPIC_API_KEY`, `net { allow ... port=443; allow
+  ... }`): dry-run with both vars set renders `--setenv PATH ...`, `--setenv
+  PI_PROVIDER google`, `--setenv ANTHROPIC_API_KEY <redacted>`, plus the footer
+  that the block will not run verbatim. Grep for the raw secret in the plan: 0
+  matches.
+- **Both env shapes distinguished**: literal shows its value; passthrough and
+  secret resolve from hotcell's own env. Verified.
+- **Missing var is a hard error before any state**: unset secret →
+  `Error: secret \`ANTHROPIC_API_KEY\`: ... not set in hotcell's environment`
+  (exit 1); unset passthrough → analogous message. No `.cell/` directory is
+  created in either case.
+- **Never written to cell state**: after a real `hotcell run -y`,
+  `.cell/default/provisioned_as.json` holds only
+  `{"key":"ANTHROPIC_API_KEY","source":"Secret"}` and
+  `{"key":"PI_PROVIDER","source":"Passthrough"}`; `grep -r` for the secret
+  value across all of `.cell/` returns 0 matches.
+- **package/seed gone**: `package "nodejs"` and `seed "..." "..."` are rejected
+  by the parser (`is not implemented — ... removed from the Cellfile grammar`),
+  not silently accepted; and neither appears in the README reference. An unknown
+  node (`nett { ... }`) fails with `unknown Cellfile node \`nett\``, matching the
+  README's typo-safety claim.
+- **Endpoint form**: `allow "host" port=N`; port-optional `allow "host"`
+  persists as `"port": null`. No `host:port` string in README or example.
+- **pi-bootstrap example**: from the example dir, dry-run with `GOOGLE_API_KEY`
+  exported renders `--setenv GOOGLE_API_KEY <redacted>` (raw value leaked 0
+  times); without the key it errors cleanly before any sandbox and creates no
+  state. Comments now instruct exporting the key and using `secret`, never
+  pasting it into the file.
+- **Other commands**: `status` (default + `--name scratch`), `destroy`
+  (prompts `[y/N]` as README shows; `--force` tears down), `--help`,
+  `--version` (0.1.0) all behave as written.
+
+Static checks:
+
+- Prerequisites state Rust 1.95+; `Cargo.toml` `rust-version = "1.95"` agrees.
+- No stale v1 grammar tokens in README/example: no `key = value`, `host:port`,
+  `host_path`, `provision.type`, `net.allow`, `env.*`, `1.81`, `.ini`, or `=>`.
+  The only grep hits for `seed`/`package` are the English verb "seed(s)" and
+  "package manager" — not grammar directives.
+- No overclaiming: secret claims ("redacted in the plan", "never written to
+  cell state", "hard error if unset") are each borne out by the runs above; the
+  footer correctly warns the plan will not run verbatim.
+
+Nit (non-blocking, not a change request): the real `hotcell run -y` with a
+`net` block failed at proxy startup with `path must be shorter than SUN_LEN` —
+this is an artifact of the very long scratchpad path used for the Unix socket,
+not a documentation defect; the plan, env resolution, and state write all
+completed correctly before it.
