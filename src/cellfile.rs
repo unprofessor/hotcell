@@ -198,14 +198,23 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
         .map_err(|error: KdlError| syntax_error(&error, text, path))?;
 
     let mut decl = CellDeclaration::default();
+    // Byte offsets of the first occurrence of each single-valued node, so a
+    // second occurrence can be rejected citing both. `env`, `secret`,
+    // `host-path` and `allow` are *not* tracked here — they accumulate by
+    // design.
+    let mut seen = SingleValued::default();
     for node in document.nodes() {
         match node.name().value() {
             "workdir" => {
+                seen.workdir.check(node, "workdir", text, path)?;
                 reject_children(node, text, path)?;
                 reject_properties(node, text, path)?;
                 decl.workdir = only_string_argument(node, "workdir", text, path)?;
             }
-            "provision" => decl.provisioner = parse_provision(node, text, path)?,
+            "provision" => {
+                seen.provision.check(node, "provision", text, path)?;
+                decl.provisioner = parse_provision(node, text, path)?;
+            }
             "env" => decl.environment.push(parse_env(node, text, path)?),
             "secret" => {
                 reject_children(node, text, path)?;
@@ -216,7 +225,10 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
                     source: EnvSource::Secret,
                 });
             }
-            "net" => parse_net(node, &mut decl.network, text, path)?,
+            "net" => {
+                seen.net.check(node, "net", text, path)?;
+                parse_net(node, &mut decl.network, text, path)?;
+            }
             // Dropped from the grammar rather than ported: they parsed in the
             // v1 line format but no provisioner ever acted on them. Named
             // explicitly so the error says "gone", not "unknown".
@@ -243,6 +255,50 @@ fn parse(text: &str, path: &Path) -> anyhow::Result<CellDeclaration> {
         }
     }
     Ok(decl)
+}
+
+/// First-occurrence tracker for the single-valued nodes. `workdir`,
+/// `provision` and `net` may each appear at most once: a second `workdir` or
+/// `provision` would silently override the first (last-wins), and a second
+/// `net` would silently *merge* its `allow` children into the first block's
+/// allowlist. Both are guesses the grammar refuses to make, so a repeat is a
+/// located error naming the node and citing both occurrences.
+#[derive(Default)]
+struct SingleValued {
+    workdir: FirstSeen,
+    provision: FirstSeen,
+    net: FirstSeen,
+}
+
+/// The byte offset of a node's first occurrence, or `None` until it is seen.
+#[derive(Default)]
+struct FirstSeen(Option<usize>);
+
+impl FirstSeen {
+    /// Record `node` as the first occurrence, or fail if one was already
+    /// recorded. The error points at the duplicate and cites the first
+    /// declaration's `line:col`.
+    fn check(&mut self, node: &KdlNode, name: &str, text: &str, path: &Path) -> anyhow::Result<()> {
+        match self.0 {
+            None => {
+                self.0 = Some(node.start());
+                Ok(())
+            }
+            Some(offset) => {
+                let (line, column) = line_column(text, offset);
+                Err(error_at(
+                    path,
+                    text,
+                    node,
+                    format!(
+                        "`{name}` may be declared only once, but is declared again here; \
+                         first declared at {}:{line}:{column}",
+                        path.display()
+                    ),
+                ))
+            }
+        }
+    }
 }
 
 /// Parse `provision "kind" script="..." { host-path "..." }`.
@@ -840,6 +896,129 @@ env.PATH = /usr/bin
         assert!(
             err.to_string().contains("comments start with `//`"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_workdir_is_an_error_citing_both() {
+        let err = parse("workdir \"/a\"\nworkdir \"/b\"\n", &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("`workdir` may be declared only once"),
+            "{message}"
+        );
+        // Points at the second occurrence...
+        assert!(message.contains("/tmp/x/Cellfile:2:1:"), "{message}");
+        // ...and cites the first.
+        assert!(
+            message.contains("first declared at /tmp/x/Cellfile:1:1"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn duplicate_provision_is_an_error_citing_both() {
+        // The bug from the ticket: last-wins silently dropped the first
+        // block's `host-path "/etc/hostname"`.
+        let text = "\
+provision \"shell\" script=\"./p.sh\" { host-path \"/etc/hostname\" }
+provision \"shell\" script=\"./p.sh\" { host-path \"/etc/machine-id\" }
+";
+        let err = parse(text, &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("`provision` may be declared only once"),
+            "{message}"
+        );
+        assert!(message.contains("/tmp/x/Cellfile:2:1:"), "{message}");
+        assert!(
+            message.contains("first declared at /tmp/x/Cellfile:1:1"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn duplicate_net_is_an_error_citing_both() {
+        // Two `net` blocks previously *merged* their `allow` children into one
+        // allowlist with no warning; now the second block is rejected.
+        let text = "\
+net { allow \"a.com\" }
+net { allow \"b.com\" }
+";
+        let err = parse(text, &dir()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("`net` may be declared only once"),
+            "{message}"
+        );
+        assert!(message.contains("/tmp/x/Cellfile:2:1:"), "{message}");
+        assert!(
+            message.contains("first declared at /tmp/x/Cellfile:1:1"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn multi_valued_nodes_still_accumulate() {
+        // env, secret, host-path and allow accumulate by design and must keep
+        // doing so — the opposite of the single-valued nodes above.
+        let text = "\
+provision \"shell\" script=\"./p.sh\" {
+    host-path \"/etc/hostname\"
+    host-path \"/etc/machine-id\"
+}
+env FOO=\"1\"
+env BAR=\"2\"
+env PASS_ME
+secret TOKEN_A
+secret TOKEN_B
+net {
+    allow \"a.com\"
+    allow \"b.com\"
+}
+";
+        let decl = parse(text, &dir()).unwrap();
+        assert_eq!(
+            decl.provisioner.host_paths,
+            vec!["/etc/hostname", "/etc/machine-id"]
+        );
+        assert_eq!(
+            decl.environment,
+            vec![
+                EnvVar {
+                    key: "FOO".to_string(),
+                    source: EnvSource::Literal("1".to_string())
+                },
+                EnvVar {
+                    key: "BAR".to_string(),
+                    source: EnvSource::Literal("2".to_string())
+                },
+                EnvVar {
+                    key: "PASS_ME".to_string(),
+                    source: EnvSource::Passthrough
+                },
+                EnvVar {
+                    key: "TOKEN_A".to_string(),
+                    source: EnvSource::Secret
+                },
+                EnvVar {
+                    key: "TOKEN_B".to_string(),
+                    source: EnvSource::Secret
+                },
+            ]
+        );
+        assert_eq!(
+            decl.network.allowed_endpoints,
+            vec![
+                Endpoint {
+                    host: "a.com".to_string(),
+                    port: None
+                },
+                Endpoint {
+                    host: "b.com".to_string(),
+                    port: None
+                },
+            ]
         );
     }
 }

@@ -4,7 +4,7 @@ aliases: [reject-duplicate-single-valued-nodes]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Reject duplicate single-valued Cellfile nodes
-status: todo
+status: done
 assignee: null
 created: 2026-08-24
 updated: 2026-08-24
@@ -58,17 +58,21 @@ The distinction that matters, and which an implementer must not get wrong:
 
 ## Acceptance
 
-- [ ] A repeated `workdir`, `provision` or `net` node is an error naming the
+- [x] A repeated `workdir`, `provision` or `net` node is an error naming the
   node and citing both occurrences' `line:col`, not just the second.
-- [ ] `env`, `secret`, `host-path` and `allow` still accumulate; a regression
-  test asserts multiple `env` and multiple `allow` nodes all survive.
-- [ ] Duplicate `net` blocks specifically are covered — confirm first whether
-  the second block currently replaces the first's `allow` children or merges
-  them. This was not observable via `--dry-run` (the endpoint count prints
-  only at real run time), so establish the current behaviour before changing
-  it, and record what you found.
-- [ ] No state is created when the error fires; `--dry-run` fails identically.
-- [ ] `cargo fmt`, `cargo clippy --all-targets --all-features` under
+- [x] `env`, `secret`, `host-path` and `allow` still accumulate; a regression
+  test asserts multiple `env` and multiple `allow` nodes all survive
+  (`multi_valued_nodes_still_accumulate`).
+- [x] Duplicate `net` blocks specifically are covered — established current
+  behaviour before changing it: two `net` blocks **merged** their `allow`
+  children into a single allowlist (both survived), not replace. Confirmed by
+  a throwaway reproduction test before the fix (recorded in Validation). Now
+  the second `net` block is a located error like the others.
+- [x] No state is created when the error fires; `--dry-run` fails identically.
+  Verified by `a_duplicate_single_valued_node_fails_and_creates_no_state`,
+  which asserts non-zero exit and that no `.cell` directory is created — the
+  error is raised while reading the Cellfile, before any state exists.
+- [x] `cargo fmt`, `cargo clippy --all-targets --all-features` under
   `RUSTFLAGS=-D warnings`, and `cargo test` all pass.
 
 ## Notes
@@ -79,3 +83,91 @@ The distinction that matters, and which an implementer must not get wrong:
   document it — is defensible if a Cellfile include/override mechanism is ever
   added, since override semantics would then be useful. No such mechanism
   exists or is planned, so the error is the better default today.
+
+## Validation
+
+### Baseline reproduction (before the fix, throwaway tests on merged behaviour)
+
+A temporary `baseline_repro` test module printed the current handling of each
+single-valued node, then was removed:
+
+```
+$ cargo test --bin hotcell baseline_repro -- --nocapture
+BASELINE workdir = "/b"
+BASELINE provisioner = Provisioner { kind: "shell", script: Some("./p.sh"), host_paths: ["/etc/machine-id"] }
+BASELINE net endpoints = [Endpoint { host: "a.com", .. }, Endpoint { host: "b.com", .. }]
+```
+
+Confirms the ticket: duplicate `workdir` and `provision` were **last-wins**
+(the first `host-path "/etc/hostname"` silently dropped, exit 0), while
+duplicate `net` blocks **merged** their `allow` children into one allowlist
+(both `a.com` and `b.com` survived) rather than replacing.
+
+### After the fix
+
+```
+$ cargo fmt --check                                          # exit 0, clean
+$ RUSTFLAGS="-D warnings" cargo clippy --all-targets --all-features
+    Finished `dev` profile ...                               # no warnings
+$ cargo test
+    ... all 12 test binaries: test result: ok, 0 failed
+```
+
+New unit tests in `src/cellfile.rs`:
+- `duplicate_workdir_is_an_error_citing_both`
+- `duplicate_provision_is_an_error_citing_both`
+- `duplicate_net_is_an_error_citing_both`
+- `multi_valued_nodes_still_accumulate` (env/secret/host-path/allow all survive)
+
+New integration test in `tests/run_cellfile_grammar.rs`:
+- `a_duplicate_single_valued_node_fails_and_creates_no_state` — runs
+  `hotcell run --dry-run`, asserts non-zero exit, the located error citing
+  both occurrences, and that no `.cell` state directory is created.
+
+Example error a user now sees (duplicate `provision`):
+
+```
+<path>/Cellfile:2:1: `provision` may be declared only once, but is declared
+again here; first declared at <path>/Cellfile:1:1
+```
+
+## Findings
+
+- Duplicate `net` behaviour (recorded per acceptance): the previous code
+  merged, because `parse_net` pushed into the shared
+  `decl.network.allowed_endpoints`. Endpoints from both blocks survived, so
+  no `allow` child was lost — but the merge was still an unstated guess, and
+  is now rejected for consistency with the fail-closed grammar.
+
+## Review
+verdict: approved
+reviewer: reviewer-agent
+date: 2026-08-24
+
+Re-verified independently in a fresh worktree.
+
+- Diff scope: only `src/cellfile.rs`, `tests/run_cellfile_grammar.rs`, and this
+  task file changed (`git diff main..HEAD --name-only`). No other .plan/ files
+  touched. No scope creep.
+- `cargo build`: clean. `cargo fmt --check`: clean.
+  `RUSTFLAGS="-D warnings" cargo clippy --all-targets --all-features`: no
+  warnings. `cargo test`: all binaries green (main unit tests 25 passed;
+  run_cellfile_grammar 6 passed; 0 failed across the suite).
+- New tests all ran and passed: `duplicate_workdir_is_an_error_citing_both`,
+  `duplicate_provision_is_an_error_citing_both`,
+  `duplicate_net_is_an_error_citing_both`, `multi_valued_nodes_still_accumulate`,
+  and integration `a_duplicate_single_valued_node_fails_and_creates_no_state`.
+- Manual CLI reproduction (`hotcell run --dry-run`) from a tempdir:
+  - Duplicate `provision`: exit 1, error
+    `Cellfile:2:1: `+"`provision`"+` may be declared only once, but is declared
+    again here; first declared at .../Cellfile:1:1`; no `.cell` dir created.
+  - Duplicate `workdir` and duplicate `net`: same located, both-cited error
+    shape (second occurrence in the `path:line:col:` prefix, first cited in the
+    message).
+  - A valid Cellfile with two `env`, two `host-path`, and two `allow` children
+    parses and produces a full plan; both `env FOO` and `env BAR` reach the
+    agent (`--setenv FOO 1` / `--setenv BAR 2`), confirming multi-valued nodes
+    still accumulate.
+- Error quality is good: names the offending node, points at the duplicate, and
+  cites the first declaration's line:col via stored byte offset + `line_column`.
+- Every ## Acceptance criterion genuinely met.
