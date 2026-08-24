@@ -6,7 +6,7 @@ title: KDL Cellfile grammar with env passthrough and secrets
 status: todo
 assignee: null
 created: 2026-08-23
-updated: 2026-08-23
+updated: 2026-08-24
 tags: [cellfile, secrets, grammar]
 ---
 
@@ -82,6 +82,8 @@ net {
 - `redact-secrets-in-execution-plan`
 - `document-kdl-cellfile-format`
 - `realign-allium-spec-with-env-sources`
+- `reject-duplicate-single-valued-nodes`
+- `cellfile-grammar-polish`
 
 ## Notes
 
@@ -93,6 +95,10 @@ net {
   the KDL grammar. The leader should sequence these deliberately.
 - Deliberately excluded: whether `environment` should participate in cell
   identity at all — see `env-changes-should-not-reprovision`.
+- 2026-08-24 `replace-cellfile-parser-with-kdl` merged (approved by an
+  independent reviewer; 67 tests green). Its five non-blocking findings are
+  ticketed as `reject-duplicate-single-valued-nodes` (the one behavioural
+  decision) and `cellfile-grammar-polish` (the other four).
 - 2026-08-23 the story shipped four tasks and no spec work, which was an
   omission: changing `EnvVar`'s shape diverges the code from
   `hotcell.allium`. Surfaced by the reviewer of the parser task and covered by
