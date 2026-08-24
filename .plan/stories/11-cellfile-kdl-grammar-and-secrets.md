@@ -3,7 +3,7 @@ id: cellfile-kdl-grammar-and-secrets
 kind: story
 parent: v1-self-hostable-hotcell
 title: KDL Cellfile grammar with env passthrough and secrets
-status: todo
+status: done
 assignee: null
 created: 2026-08-23
 updated: 2026-08-24
