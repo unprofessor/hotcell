@@ -25,6 +25,10 @@ v1 path ships.
 - Decide packages/seeds semantics — story `packages-seeds-semantics`. `package`
   and `seed` were dropped from the KDL grammar; this decides whether the
   capability returns and, if so, its grammar.
+- Reconcile spec↔code divergences — story `reconcile-spec-code-divergences`.
+  Four confirmed drifts between `hotcell.allium` and the code (provisioner kind
+  name, unenforced `Session`, `provisioner_override` with no CLI flag, discarded
+  `provisioning_error`), each a decide-and-align item.
 
 ## Out of scope
 
@@ -37,3 +41,8 @@ v1 path ships.
 
 - 2026-08-24 created to rehome two stories out of `v1-self-hostable-hotcell`
   that are not self-hosting blockers, keeping the v1 epic's scope honest.
+- 2026-08-24 added [[reconcile-spec-code-divergences]] to home the four
+  pre-existing spec↔code drifts confirmed by the `weed` pass in
+  [[realign-allium-spec-with-env-sources]]. The `Session` item is
+  session-lifecycle hygiene rather than strictly Cellfile/provisioning and can
+  rehome if a session epic appears.
