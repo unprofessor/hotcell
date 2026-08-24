@@ -104,9 +104,9 @@ Manual `--dry-run` (real binary):
 
 ## Review
 
-- verdict: approved
-- reviewer: reviewer-agent
-- date: 2026-08-24
+verdict: approved
+reviewer: reviewer-agent
+date: 2026-08-24
 
 Re-verified independently in the worktree (fresh context, did not trust the
 worker's self-report):
