@@ -4,7 +4,7 @@ aliases: [cellfile-grammar-polish]
 kind: task
 parent: cellfile-kdl-grammar-and-secrets
 title: Cellfile grammar polish from the parser review
-status: review
+status: done
 assignee: null
 created: 2026-08-24
 updated: 2026-08-24
