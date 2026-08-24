@@ -106,3 +106,38 @@ fn an_unknown_node_is_a_located_error() {
     );
     assert!(stderr.contains("Cellfile:2:1:"), "stderr: {stderr}");
 }
+
+/// A repeated single-valued node (here `provision`) fails the run through
+/// `--dry-run` with a located error citing both occurrences, and creates no
+/// `.cell` state — the failure is raised while reading the Cellfile, before
+/// any state exists. This is the ticket's bug: last-wins used to drop the
+/// first block's `host-path "/etc/hostname"` silently at exit 0.
+#[test]
+fn a_duplicate_single_valued_node_fails_and_creates_no_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "\
+provision \"shell\" script=\"./p.sh\" { host-path \"/etc/hostname\" }
+provision \"shell\" script=\"./p.sh\" { host-path \"/etc/machine-id\" }
+";
+    fs::write(dir.path().join("Cellfile"), text).expect("write Cellfile");
+    let output = Command::new(hotcell_bin())
+        .current_dir(dir.path())
+        .args(["run", "--dry-run", "--", "/bin/true"])
+        .output()
+        .expect("run hotcell");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "must not run: {stderr}");
+    assert!(
+        stderr.contains("`provision` may be declared only once"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("Cellfile:2:1:"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("first declared at") && stderr.contains("Cellfile:1:1"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !dir.path().join(".cell").exists(),
+        "no cell state may be created when parsing fails"
+    );
+}
