@@ -44,8 +44,8 @@ env HOME="/home/agent"
 // <redacted> in the execution plan, and is never stored in cell state. Export
 // it in the shell you run hotcell from; if it is unset, the run fails before
 // any sandbox starts.
-env PI_PROVIDER="google"
-secret GOOGLE_API_KEY            // Gemini (google)
+// env PI_PROVIDER="google"
+// secret GOOGLE_API_KEY         // Gemini (google)
 // env PI_PROVIDER="anthropic"
 // secret ANTHROPIC_API_KEY      // Claude
 // env PI_PROVIDER="openai"
@@ -57,9 +57,9 @@ secret GOOGLE_API_KEY            // Gemini (google)
 // only the provider host(s) you actually use; everything else is blocked.
 // Uncomment the line(s) matching your chosen provider above.
 net {
-    allow "generativelanguage.googleapis.com" port=443   // Gemini (google)
-    // allow "api.anthropic.com" port=443                // Claude (anthropic)
-    // allow "api.openai.com" port=443                   // GPT (openai)
+    // allow "generativelanguage.googleapis.com" port=443 // Gemini (google)
+    // allow "api.anthropic.com" port=443                 // Claude (anthropic)
+    // allow "api.openai.com" port=443                    // GPT (openai)
 }
 
 // IMPORTANT — provider config precedence (verified end-to-end):
