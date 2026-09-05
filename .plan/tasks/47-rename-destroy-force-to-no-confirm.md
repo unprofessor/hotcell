@@ -64,3 +64,27 @@ carrying a hidden alias.
   misnomer; the flag declines to prompt rather than forcing past anything.
 - 2026-09-05 developer decided against a deprecation alias: remove `--force`
   outright rather than hide-and-warn it.
+- 2026-09-05 `--force` is **reserved, not retired**. It returns with corrected
+  semantics when the brokered VCS sync (shadow remote) lands, as the override
+  for a *refusal* — not a prompt bypass:
+
+  | | trigger | bypass |
+  |---|---|---|
+  | Confirmation | always | `-y`/`--no-confirm` |
+  | Refusal | unfetched refs in the cell's shadow | `--force` |
+
+  This is `git push --force`'s meaning: override a refusal to lose data. The
+  point of the split is that `-y` stays safe — an unattended `destroy -y`
+  skips the prompt but still hard-stops on unfetched work, and
+  `destroy -y --force` is the explicit "unattended, loss accepted".
+
+  Decided alongside: refuse *before* prompting, never after (git refuses
+  outright); `--force` is a no-op when there is no shadow or nothing
+  unfetched; it stays long-only, since a data-loss override should not be one
+  keystroke. Do not remove `--force` here on the assumption it is gone for
+  good — this task removes it only because there is no refusal to override
+  until the broker exists.
+
+  The sync story must declare `depends_on: [rename-destroy-force-to-no-confirm]`
+  so the reintroduction lands on the corrected flag surface, not on top of the
+  old misnomer.
