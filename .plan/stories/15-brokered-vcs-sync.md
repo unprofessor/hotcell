@@ -8,7 +8,7 @@ assignee: null
 created: 2026-09-05
 updated: 2026-09-05
 tags: [sync, vcs, bridge, strawman]
-depends_on: [rename-destroy-force-to-no-confirm, packages-seeds-semantics, guard-uds-socket-path-length]
+depends_on: [design-brokered-vcs-sync, rename-destroy-force-to-no-confirm, packages-seeds-semantics, guard-uds-socket-path-length]
 ---
 
 ## Status
@@ -113,6 +113,8 @@ authoritative; it is two peers sharing a repo.
 
 ## Notes
 
+- 2026-09-05 design is tracked by [[design-brokered-vcs-sync]], which gates
+  this story. Open questions below are that task's agenda.
 - 2026-09-05 stubbed as a strawman at the developer's request. Depends on
   [[rename-destroy-force-to-no-confirm]] so the `--force` reintroduction lands
   on the corrected flag surface.
