@@ -29,6 +29,8 @@ v1 path ships.
   Four confirmed drifts between `hotcell.allium` and the code (provisioner kind
   name, unenforced `Session`, `provisioner_override` with no CLI flag, discarded
   `provisioning_error`), each a decide-and-align item.
+- CLI surface cleanup — story `cli-surface-cleanup`. Naming and consistency
+  fixes to the command line, starting with `destroy --force`.
 
 ## Out of scope
 
@@ -46,3 +48,6 @@ v1 path ships.
   [[realign-allium-spec-with-env-sources]]. The `Session` item is
   session-lifecycle hygiene rather than strictly Cellfile/provisioning and can
   rehome if a session epic appears.
+- 2026-09-05 added [[cli-surface-cleanup]] to home a CLI-naming fix with no
+  existing story. It is not Cellfile/provisioning work; rehome if a CLI/UX
+  epic appears.
