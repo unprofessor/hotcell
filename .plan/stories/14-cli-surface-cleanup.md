@@ -17,7 +17,7 @@ harden into things people script against.
 
 ## Scope
 
-- Rename `destroy --force` to `-y`/`--no-confirm`, matching `run` — task
+- Replace `destroy --force` with `-y`/`--no-confirm`, matching `run` — task
   `rename-destroy-force-to-no-confirm`.
 
 ## Notes
