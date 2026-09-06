@@ -15,19 +15,20 @@ depends_on: []
 ## Goal
 
 Converge the brokered VCS sync design far enough to decompose
-[[brokered-vcs-sync]] into implementable tasks.
+[[post-v1-workspace-sync]] into implementable tasks.
 
 ## Context
 
 In flight as a live design discussion. The current state of the design — the
 agreed shape, what is settled, what was rejected and why — is recorded in
-[[brokered-vcs-sync]] and should stay there rather than be duplicated here.
+[[post-v1-workspace-sync]] and should stay there rather than be duplicated here.
 This task tracks the *activity* and gates the implementation story.
 
 ## Approach
 
-Answer the story's open questions, in dependency order. The first is blocking;
-the rest shape the design but can be settled in parallel.
+Answer the open questions, in dependency order. The first was blocking; the
+rest shaped the design. All six are now settled or deferred — see the design
+record in [[post-v1-workspace-sync]]. Retained below for provenance.
 
 1. **Workspace model** (blocking). How a cell names and mounts N repos. No
    Cellfile construct exists — only a single `workdir`
@@ -54,15 +55,17 @@ the rest shape the design but can be settled in parallel.
 
 ## Acceptance
 
-- [ ] Each of the six open questions in [[brokered-vcs-sync]] is either
-  answered (with rationale recorded in that story) or explicitly deferred with
-  a reason.
-- [ ] [[brokered-vcs-sync]] loses its STRAWMAN marker and carries a scope its
-  tasks can be cut from.
-- [ ] The implementation tasks are filed under [[brokered-vcs-sync]] with
-  dependency edges.
-- [ ] Decisions that change existing surfaces (Cellfile grammar, `hotcell.allium`,
-  the destroy gates) are cross-referenced from the tickets that own them.
+- [x] Each of the six open questions is answered with rationale, or deferred
+  with a reason, in the [[post-v1-workspace-sync]] design record.
+- [x] The strawman story is retired and its design record lifted to the epic.
+- [x] The epic is decomposed into stories with dependency edges:
+  [[workspace-exchange-contract]], [[workspace-repo-model]],
+  [[git-bridge-transport]], [[shadow-repo-lifecycle]],
+  [[shadow-ref-protection]].
+- [x] Decisions that change existing surfaces are cross-referenced from the
+  tickets that own them ([[rename-destroy-force-to-no-confirm]],
+  [[packages-seeds-semantics]], [[guard-uds-socket-path-length]]).
+- [ ] Decomposition reviewed by the developer; close once accepted.
 
 ## Notes
 

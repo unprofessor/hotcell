@@ -18,7 +18,8 @@ decision record and a decomposable ticket — not code.
 
 ## Scope
 
-- Brokered VCS sync design — task `design-brokered-vcs-sync`.
+- Brokered VCS sync design — task `design-brokered-vcs-sync`
+  (output: the [[post-v1-workspace-sync]] story set).
 
 ## Notes
 
