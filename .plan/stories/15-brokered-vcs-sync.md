@@ -2,20 +2,19 @@
 id: brokered-vcs-sync
 kind: story
 parent: post-v1-workspace-sync
-title: Brokered VCS sync via a shadow remote (STRAWMAN)
+title: Brokered VCS sync via a shadow remote
 status: todo
 assignee: null
 created: 2026-09-05
 updated: 2026-09-05
-tags: [sync, vcs, bridge, strawman]
+tags: [sync, vcs, bridge]
 depends_on: [design-brokered-vcs-sync, rename-destroy-force-to-no-confirm, packages-seeds-semantics, guard-uds-socket-path-length]
 ---
 
 ## Status
 
-**Strawman.** Design converged on the shape below in discussion; not yet
-sized, not yet decomposed into tasks. Do not claim this — it needs the open
-questions answered first.
+Design settled; awaiting decomposition into stories. Do not claim this ticket
+directly — it is being replaced by the story set the epic will carry.
 
 ## Shape
 
@@ -68,37 +67,95 @@ authoritative; it is two peers sharing a repo.
 - **This composes with the CONNECT proxy rather than replacing it**:
   `origin` → bridge, `upstream` → real remote. Two features.
 
-## Open questions
+## Settled design
 
-1. **Workspace model.** There is no Cellfile construct for N repos — only a
-   single `workdir` (`src/cellfile.rs:212-216`). A `repo` node (name, host
-   path, in-cell mount) is needed, and it overlaps `seed`, which was dropped
-   from the grammar and is still undecided (`src/cellfile.rs:239-250`). These
-   should be one decision, not two — hence the dependency on
-   [[packages-seeds-semantics]]. **This gates everything else.**
-2. **Is ingress/egress inspection in scope?** Scanning and sanitizing at the
-   boundary was the original motivation. If it is v1 of this feature the
-   broker needs a policy surface and should share the decision/audit
-   vocabulary being defined in [[firewall-warn-audit]]; if it is later, the
-   broker is a dumb pipe and much smaller.
-3. **Shadow lifecycle.** Is the bare repo seeded from the developer's real
-   repo at cell start, and refreshed how? This is what buys the agent real
-   history to log and rebase against — the thing a flat diff/export cannot
-   give. Also: what happens to the shadow on `hotcell destroy` (see the
-   refusal above).
-4. **Shadow remote naming.** `shadow` for the default cell, `shadow-<cell>`
-   otherwise? Plus collision handling when the host repo already has a remote
-   by that name.
-5. **Does a backend seam exist yet?** A `SyncBackend` enum/trait with the
-   host-side reconciler as a second implementation, or one concrete broker
-   until a second is real. A *plugin system* was argued against: the execution
-   plan is the trust artifact (`src/plan.rs:16`), and this project's pattern
-   for powerful extension points is an explicit approval gate (cf.
-   `approve-rego-policy-gate`, `approve-tls-mitm-gate`), not an open door.
-6. **Spec first?** `hotcell.allium` has seeding (`FileMapping`, one-shot,
-   ingress-only) and persistence (`FilesPersistAfterSession`, 476-482) but no
-   concept of *exchange*. This repo is spec-first; the gap probably wants an
-   open question in the spec before code.
+Converged 2026-09-05/06. Recorded here so the decomposition can be cut from it.
+
+### Workspace model
+
+Cellfile declares logical repo *slots* (committed, portable); a machine-local
+uncommitted file *binds* them to real paths. No declared slot means no sync
+for that repo — binding is never implicit.
+
+```kdl
+// Cellfile — committed
+repo "hotcell"
+repo "planr" mount="/work/planr"    // optional; defaults to <workdir>/<name>
+
+// .cell/bindings.kdl — gitignored, machine-local
+bind "hotcell" path="/home/dave/projects/hotcell"
+bind "planr"   path="/home/dave/projects/planr"
+```
+
+The precedent for host paths in a Cellfile is `provision.host_paths`
+(`~/.nvm/...`, `~/.pi`), but those are conventional tool locations; a project
+layout is not, and baking it in would break `ProvisionedEnvironment`'s
+"reproducible from its Cellfile" claim (`hotcell.allium:381-388`).
+
+**Binding the Cellfile's own repo is opt-in**, not implicit. It leaks the
+Cellfile repo's contents into the cell; it is also how a cell improves its own
+environment, behind a review gate, so it is worth having — just not by
+default.
+
+### Shadow lifecycle
+
+**Birth** — bare-clone the real repo into the shadow; install a `shadow`
+remote in the real repo; optionally (flag) clone from `origin` into the named
+directory inside the cell, in case the agent should do that itself. Touch the
+developer's repo only through safe `git -C` porcelain: it is a repo hotcell
+does not own and whose state is unknown, so plug in a sink and a faucet, never
+perform open-heart surgery. Bail on conflict or error and tell the user how to
+make the repo accept a `shadow` remote. Roll back cleanly on failure at any
+point — reuse the Death procedure rather than writing a separate unwind.
+
+**Life** — ordinary git. The shadow is just a remote.
+
+**Death** — Birth's steps in reverse, minus in-cell deletion (`destroy` owns
+that): check for data loss, remove the `shadow` remote from the real repo,
+remove the shadow bare repo, leave the in-cell repo alone. Reverse order
+matters — never leave a remote pointing at a deleted path. A dangling in-cell
+`origin` afterwards is honest about the remote's state, exactly as when a
+forge goes down.
+
+The data-loss check is what makes deletion a valid inverse of cloning: the
+true inverse is "the shadow holds nothing the real repo lacks", not "delete
+it". `destroy` calls this procedure rather than duplicating it, which also
+gives the `--force` refusal one implementation site.
+
+### Boundary inspection
+
+Out of scope for v1; leave architectural space. Git hooks (local and broker)
+are the intended gates, and a bare repo has a hooks directory by construction,
+so nothing needs reserving. Alternatively a "sanitary" broker once a "simple"
+one exists.
+
+### Backend seam
+
+Not yet. Write the git broker concretely and extract an interface once a
+second implementation exists to reveal what is actually common. Keep
+transport, repo lifecycle, and policy hooks in separate modules so the
+extraction is mechanical. A third-party *plugin API* remains rejected — the
+execution plan is the trust artifact (`src/plan.rs:16`), and this project
+gates powerful extension points explicitly (cf. `approve-rego-policy-gate`).
+
+### Spec first
+
+The epic's first story defines the exchange concept in Allium before any code.
+
+## Deferred
+
+- **Bindings to arbitrary remote URLs.** Requires injecting auth the in-cell
+  agent must not see — otherwise the CONNECT proxy already covers arbitrary
+  remote access and this adds nothing. Auth injection is a gated-feature-sized
+  change, not a resolver. The no-auth alternative is user-directed sync:
+  bind the slot to a *local clone* that has the remote, and the developer
+  pushes onward with their own credentials.
+- **Shadow remote-tracking shim.** Two writers sharing one ref namespace in
+  the shadow will collide on common branch names. That is ordinary git
+  friction rather than breakage, but a default refspec convention at birth
+  (e.g. host pushes land under their own prefix) would remove the coordination
+  cost. Out-of-band from "standard git primitives", so it needs a shim layer.
+  Deferred; revisit if sync becomes a PITA in practice.
 
 ## Rejected
 
