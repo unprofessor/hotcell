@@ -23,6 +23,7 @@ Delivered as five stories, contract first:
 
 - `workspace-exchange-contract` — define exchange in Allium before any code.
 - `workspace-repo-model` — Cellfile repo slots and machine-local bindings.
+- `binding-cli-flow` — reviewing and editing bindings.
 - `git-bridge-transport` — the UDS git transport and its remote helper.
 - `shadow-repo-lifecycle` — Birth/Death of a shadow, and `destroy` delegation.
 - `shadow-ref-protection` — opt-in per-ref push policy and the hook convention.
@@ -148,6 +149,37 @@ nothing but its shadow.
 Reused from the firewall: the directory siting, the read-only-bind property
 that stops the agent replacing the socket, and the `argv[0]` re-invocation
 pattern for the in-namespace helper. Not reused: the socket itself.
+
+### Declaration and binding
+
+The Cellfile declares logical slots; a machine-local file binds them. Declared
+slots are **required** (an unbound one fails early, as an unset `secret`
+already does), and **naked bindings are rejected** — the Cellfile is not the
+authority on cell *content*, since bindings are machine-local by design, but it
+is the authority on cell **shape**. Ad-hoc work has an explicit, ephemeral
+`hotcell run --repo <name>=<path>` escape hatch rather than an implicit one.
+
+Slot names carry no meaning to hotcell — codenames, numerals, anything the
+author and operator agree on out of band. Their *form* is constrained, because
+a name is load-bearing as a path segment, a bindings key, a protocol routing
+token, and a shadow directory name.
+
+### Reconciliation
+
+Shadows are reconciled against the present declaration, not tracked through
+change events: slot without shadow → Birth, shadow without slot → Death,
+both → nothing. A rename is Death + Birth, which is the right semantics
+regardless. No history means no ABA problem, the reconciler is self-healing,
+and the unconditional data-loss check means intent never has to be inferred.
+
+`provisioned_as.json` already snapshots the parsed declaration
+(`src/state.rs:59-64`) but is the wrong vehicle: its lifecycle is provisioning,
+and putting slots in the declaration would put them in cell identity, so a
+rename would force a re-provision — the bug
+[[env-changes-should-not-reprovision]] exists to fix.
+
+Each shadow records the host path it was born from, for provenance and better
+orphan messages.
 
 ### Shadow lifecycle
 
