@@ -7,7 +7,8 @@ status: todo
 assignee: null
 created: 2026-08-23
 updated: 2026-08-24
-tags: [cellfile, provisioning]
+tags: [cellfile, provisioning, identity]
+depends_on: [workspace-exchange-contract]
 ---
 
 ## Goal
@@ -52,3 +53,17 @@ Three approaches were sketched; none chosen:
   [[cellfile-kdl-grammar-and-secrets]].
 - 2026-08-24 rehomed under [[post-v1-cellfile-and-provisioning]]: a caching
   refinement, not a self-hosting blocker.
+- 2026-09-06 the mechanism is now **specified**, not just sketched.
+  [[workspace-exchange-contract]] introduced
+  `CellDeclaration.provisioning_identity` — the subset of the declaration that
+  determines the rootfs — and redefined `is_current` over it, excluding both
+  `environment` and `repos`. Workspace sync needed the same property for repo
+  slots, so rather than special-casing twice, one projection now covers both.
+  This story implements it.
+- 2026-09-06 approach #2 stands and is now load-bearing: excluding the whole
+  environment from identity is only sound once nothing in provisioning reads
+  that environment, so decoupling the provisioner's home from the agent's
+  `env.HOME` is a prerequisite of the specified behaviour rather than a
+  tidiness preference. The spec records the residual question — whether any
+  other provisioning input is drawn from the agent's declared environment —
+  as an open question; answer it here.

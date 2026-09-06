@@ -33,6 +33,16 @@ external entity Cellfile {
     declaration: CellDeclaration
 }
 
+external entity RepoBindings {
+    -- The operator's machine-local repo bindings for a Cellfile directory.
+    -- Operator-authored rather than author-authored, uncommitted, and read
+    -- fresh on every access just as the Cellfile is. Kept separate from the
+    -- Cellfile because a binding is true of one machine, while a Cellfile is
+    -- meant to travel.
+    directory: String
+    bindings: Set<RepoBinding>
+}
+
 external entity ProvisioningProcess {
     -- hotcell's internal provisioning system: installs packages, seeds files,
     -- configures the network firewall and environment. The provisioner is
@@ -93,13 +103,55 @@ value Provisioner {
     host_paths: Set<String>
 }
 
+value RepoSlot {
+    -- A logical repository the cell works on, declared in the Cellfile. The
+    -- Cellfile names the slot; it deliberately does not say where that
+    -- repository lives on any particular machine, so a Cellfile stays
+    -- portable across operators. An operator supplies the location as a
+    -- RepoBinding.
+    --
+    -- The name carries no meaning to hotcell — it is an out-of-band agreement
+    -- between the Cellfile's author and its operator. Its form is
+    -- constrained: see the SlotNamesAreUsable guarantee.
+    name: String
+    mount: String?       -- path inside the cell; defaults to {workdir}/{name}
+}
+
+value RepoBinding {
+    -- An operator's machine-local resolution of a slot name to a repository
+    -- on this host. Bindings are never part of the Cellfile and never part of
+    -- a cell's provisioning identity.
+    name: String
+    path: String         -- host path of the repository to exchange with
+}
+
 value CellDeclaration {
     packages: Set<String>
     files: Set<FileMapping>
     environment: Set<EnvVar>
+    repos: Set<RepoSlot>
     network: NetworkPolicy
     workdir: String
     provisioner: Provisioner
+
+    -- The subset of the declaration that determines the provisioned
+    -- filesystem, and therefore the cell's identity for the purpose of
+    -- deciding whether to re-provision.
+    --
+    -- `environment` and `repos` are deliberately excluded. Environment
+    -- variables are resolved and handed to the agent at launch; they do not
+    -- shape the rootfs, so editing one should not reproduce an identical
+    -- filesystem from scratch. Repo slots describe an exchange arrangement
+    -- outside the rootfs entirely, so adding, removing or renaming one must
+    -- not force a re-provision either. Excluding them here is what makes that
+    -- structural rather than a rule each caller has to remember.
+    provisioning_identity: {
+        packages: packages,
+        files: files,
+        network: network,
+        workdir: workdir,
+        provisioner: provisioner
+    }
 }
 
 ------------------------------------------------------------
@@ -129,11 +181,36 @@ entity Cell {
     -- names; the name is a developer-chosen label, defaulting to "default",
     -- so multiple cells can be created from a single Cellfile.
     cellfile: Cellfile
+    repo_bindings: RepoBindings
     name: String
     status: unprovisioned | provisioning | provisioned | provisioning_failed
 
     sessions: Session with cell = this
     active_sessions: sessions where status = running
+
+    -- Host-side repositories mediating exchange for this cell, one per bound
+    -- slot. A shadow exists or it does not; its lifecycle is Birth and Death
+    -- rather than a status field.
+    shadows: Shadow with cell = this
+    orphaned_shadows: shadows where is_orphaned
+
+    -- Every declared slot has a binding on this machine. A declared slot is
+    -- a requirement, not an offer: a cell missing one cannot run.
+    all_slots_bound: cellfile.declaration.repos.all(
+        r => repo_bindings.bindings.any(b => b.name = r.name)
+    )
+
+    -- Every binding names a slot the Cellfile declares. The Cellfile is not
+    -- the authority on where repositories live, but it is the authority on
+    -- which repositories a cell has, so a binding without a slot is an error
+    -- rather than an extra repository.
+    no_naked_bindings: repo_bindings.bindings.all(
+        b => cellfile.declaration.repos.any(r => r.name = b.name)
+    )
+
+    -- True when no shadow holds work that has not reached the operator's
+    -- repository. Guards destruction; see WorkNotSilentlyLost.
+    shadows_fully_fetched: shadows.all(s => not s.has_unfetched_work)
 
     -- The declaration the cell was last provisioned with. Set when
     -- provisioning succeeds. Because a passthrough or secret EnvVar carries no
@@ -158,13 +235,20 @@ entity Cell {
     -- Description of what went wrong when provisioning fails.
     provisioning_error: String when status = provisioning_failed
 
-    -- True (fresh) when the provisioned environment matches the Cellfile's
-    -- current declaration. False (stale) when the Cellfile has changed since
-    -- the last provisioning. Comparison is over declarations, which record only
-    -- an EnvVar's key and source (never a resolved passthrough or secret
-    -- value), so changing the value of a host secret or passthrough variable
-    -- between runs does NOT make a cell stale and does not force a re-provision.
-    is_current: provisioned_as = cellfile.declaration
+    -- True (fresh) when the provisioned filesystem still matches what the
+    -- Cellfile asks for. False (stale) when a provisioning-relevant part of
+    -- the Cellfile has changed since the last provisioning.
+    --
+    -- Comparison is over provisioning_identity, not the whole declaration, so
+    -- changes that cannot affect the rootfs do not force a rebuild: editing an
+    -- environment variable, or adding, removing or renaming a repo slot,
+    -- leaves a provisioned cell fresh. Changes to packages, seeded files,
+    -- network policy, workdir or the provisioner do make it stale.
+    --
+    -- Independently of that, a declaration records only an EnvVar's key and
+    -- source and never a resolved passthrough or secret value, so rotating a
+    -- host secret between runs cannot make a cell stale either.
+    is_current: provisioned_as.provisioning_identity = cellfile.declaration.provisioning_identity
 
     -- True when the provisioner's inputs are the same as when the cell was
     -- last provisioned. provisioner_digest(provisioner, directory) is a
@@ -186,6 +270,37 @@ entity Cell {
         provisioned -> provisioning
         provisioned -> unprovisioned
     }
+}
+
+entity Shadow {
+    -- A host-side repository that mediates exchange between the operator's
+    -- repository and the cell, for one declared slot. Both sides treat it as
+    -- an ordinary remote: the agent sees it as its origin, the operator sees
+    -- it as an additional remote alongside their own. Neither side reaches
+    -- into the other's filesystem, which is why exchange does not weaken
+    -- FilesystemIsolation.
+    --
+    -- A shadow exists or it does not. Its lifecycle is Birth and Death rather
+    -- than a status field, and Death is the exact inverse of Birth.
+    cell: Cell
+    slot_name: String
+
+    -- The host repository this shadow was born from. Kept for provenance: it
+    -- lets an orphan explain which repository it came from rather than only
+    -- naming a slot that no longer exists.
+    origin_path: String
+
+    -- True when the shadow holds work that has not reached the repository it
+    -- was born from. This is the condition that makes destroying a shadow
+    -- lossy, and the only thing standing between an agent's work and its
+    -- silent disappearance.
+    has_unfetched_work: holds_unfetched_work(this)
+
+    -- True when the Cellfile no longer declares this shadow's slot. Renaming
+    -- a slot produces an orphan and a new shadow, which is the correct
+    -- reading: a renamed slot is a different repository as far as the cell is
+    -- concerned.
+    is_orphaned: not cell.cellfile.declaration.repos.any(r => r.name = slot_name)
 }
 
 entity Session {
@@ -217,6 +332,12 @@ config {
     default_cell_name: String = "default"
     state_dir: String = ".cell"
     default_provisioner_kind: String = "none"
+
+    -- Name of the remote a shadow installs in the operator's repository. The
+    -- cell's own view of the same repository is always "origin", so the two
+    -- sides name it differently on purpose: the agent sees an unremarkable
+    -- origin and needs no knowledge of hotcell.
+    shadow_remote_name: String = "shadow"
 }
 
 ------------------------------------------------------------
@@ -344,17 +465,57 @@ rule SessionCompletes {
         session.log_file = null
 }
 
+-- Workspace exchange: shadows are reconciled against the current declaration
+-- rather than tracked through change events. Comparing present state to
+-- present declaration means there is no history to be fooled by a change that
+-- reverts itself, and reconciliation converges from any starting state —
+-- including one an operator has edited by hand.
+
+rule BirthShadowForDeclaredSlot {
+    when: ReconcileShadows(cell)
+    requires: cell.all_slots_bound
+    requires: cell.no_naked_bindings
+    for slot in cell.cellfile.declaration.repos:
+        requires: not exists Shadow{cell: cell, slot_name: slot.name}
+        ensures:
+            Shadow.created(
+                cell: cell,
+                slot_name: slot.name,
+                origin_path: bound_path(cell.repo_bindings, slot.name)
+            )
+}
+
+rule DeathOfOrphanedShadow {
+    when: ReconcileShadows(cell)
+    requires: cell.all_slots_bound
+    requires: cell.no_naked_bindings
+    for shadow in cell.orphaned_shadows:
+        requires: not shadow.has_unfetched_work
+        ensures: not exists shadow
+
+    @guidance
+        -- An orphan holding unfetched work does not reconcile. The operator
+        -- is told what it is and where it came from, and chooses: fetch it,
+        -- restore the slot, or discard it deliberately. Reconciliation never
+        -- resolves that on their behalf.
+}
+
 -- Destroying: tear down the provisioned filesystem, return to unprovisioned.
+-- Destruction also takes the cell's shadows, so it carries the same
+-- work-preservation guard, and the same deliberate override.
 
 rule DestroyCell {
-    when: DestroyCellCommand(cell)
+    when: DestroyCellCommand(cell, force)
     requires: cell.status in {provisioned, provisioning_failed}
     requires: cell.active_sessions.count = 0
+    requires: cell.shadows_fully_fetched or force
     ensures:
         cell.status = unprovisioned
         cell.provisioned_as = null
         cell.provisioned_script_digest = null
         cell.provisioning_error = null
+        for shadow in cell.shadows:
+            not exists shadow
 }
 
 ------------------------------------------------------------
@@ -393,6 +554,14 @@ surface Cleanroom {
         -- Enforcement is via an HTTP proxy; non-HTTP traffic is blocked by
         -- default. A cell with no allowed endpoints has no network access.
 
+    @guarantee WorkspaceExchangeIsMediated
+        -- A bound repository reaches the agent as an ordinary git remote it
+        -- can fetch from and push to, not as a host path it can read. No part
+        -- of the operator's filesystem becomes visible or writable inside the
+        -- cell, so exchange adds a channel without weakening
+        -- FilesystemIsolation. The agent needs no knowledge that the remote is
+        -- anything unusual.
+
     @guarantee CleanEnvironment
         -- Only declared packages, seeded files and declared environment
         -- variables are present when a session starts. No host state leaks in
@@ -426,6 +595,8 @@ surface DeveloperCLI {
             cell.is_current
 
     provides:
+        ReconcileShadows(cell)
+            when cell.cellfile = cwd
         RunCell(cwd, name, program, args, provisioner_override?)
             -- name defaults to config.default_cell_name when omitted.
             -- provisioner_override, when given, replaces the Cellfile's
@@ -434,8 +605,12 @@ surface DeveloperCLI {
             -- are preserved. The override is a one-shot deviation, so the
             -- recorded provisioned_as reflects it and a subsequent run without
             -- the override re-provisions.
-        DestroyCellCommand(cell)
+        DestroyCellCommand(cell, force)
             when cell.cellfile = cwd
+            -- force overrides the refusal to destroy unfetched work. It does
+            -- not override any other precondition, and it is distinct from
+            -- skipping the confirmation prompt: one declines to ask, the
+            -- other accepts a loss.
 
     @guarantee RelayOnly
         -- hotcell run blocks until the program exits, relaying stdin/stdout/stderr
@@ -479,6 +654,43 @@ surface DeveloperCLI {
         -- developer until the cell is destroyed. The cell's filesystem is
         -- backed by the state directory, so agent-produced files live
         -- alongside other cell state.
+
+    @guarantee BindableCellOrEarlyFailure
+        -- A declared repo slot is a requirement. If any slot has no binding on
+        -- this machine, or any binding names a slot the Cellfile does not
+        -- declare, hotcell reports which one and aborts before any session
+        -- starts — the same treatment a declared-but-unset passthrough or
+        -- secret variable receives. The developer is never handed a cell
+        -- quietly missing a repository it was promised, nor one silently
+        -- carrying a repository its Cellfile never mentioned.
+
+    @guarantee SlotNamesAreUsable
+        -- hotcell attaches no meaning to a slot name; it is an agreement
+        -- between a Cellfile's author and its operator. It does constrain the
+        -- form, because a name determines where the repository appears inside
+        -- the cell and how it is addressed. A name that would be unsafe or
+        -- ambiguous in those positions is rejected when the Cellfile is read,
+        -- not when it is first used.
+
+    @guarantee WorkNotSilentlyLost
+        -- Destroying a cell destroys its shadows, and reconciliation destroys
+        -- a shadow whose slot is gone. Neither happens while that shadow holds
+        -- work the operator's repository has not received: hotcell refuses,
+        -- names the shadow and the repository it was born from, and leaves the
+        -- decision to the developer. The refusal can be overridden
+        -- deliberately, which is a separate act from confirming the command.
+        --
+        -- What hotcell cannot see, it does not claim to protect: work the
+        -- agent never committed, or committed but never sent to the shadow,
+        -- is beyond the boundary and is lost with the cell.
+
+    @guarantee ExchangeIsPeerToPeer
+        -- Neither side owns the other. The operator's repository and the
+        -- cell's are peers exchanging through a shared repository, so
+        -- receiving the agent's work never rewrites the developer's branches
+        -- — it arrives as a remote's refs, to be merged or discarded like any
+        -- other remote's. Nothing hotcell does to the operator's repository
+        -- goes beyond adding and removing that one remote.
 
     @guarantee StateColocatedWithCellfile
         -- Cell state persists in the state directory ({directory}/{state_dir})
@@ -571,4 +783,6 @@ deferred SessionTermination.terminate    -- see: detailed/session-termination.al
 
 open question "When a session is terminated, does it reach the same 'completed' state as a natural exit, or a distinct 'terminated' state with its own exit semantics?"
 open question "Network policy granularity: hostname/domain allowlist is sufficient for v1, but further research is needed on whether port-level restrictions, protocol restrictions, or path-level restrictions are required for real-world agent workflows"
+open question "provisioning_identity excludes the whole environment, which is only sound once nothing in provisioning reads that environment. ProvisionerCleanEnvironment still sets the provisioner's HOME from the agent's declared env.HOME, so until that coupling is cut, a change to HOME can alter the rootfs a provisioner produces while leaving the cell fresh. The chosen resolution is to give provisioning its own declared home rather than special-case HOME in identity; this specification describes the state after that change. Are there other provisioning inputs drawn from the agent's declared environment that the same argument would cover?"
+open question "Does boundary inspection of exchanged content (scanning or sanitising what crosses in either direction) belong in this contract, or does it remain outside the specification until a concrete policy exists? v1 assumes the latter and deliberately says nothing about it."
 open question "Can a provisioner mutate the declaration during provisioning (e.g. inject environment variables it discovered), or is the declaration strictly authoritative and the provisioner only seeds the filesystem? v1 assumes the latter."
