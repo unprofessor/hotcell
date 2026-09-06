@@ -1,12 +1,12 @@
 ---
-id: post-v1-workspace-sync
+id: workspace-sync
 kind: epic
-title: Post-V1 workspace sync between host and cell
+title: Workspace sync between host and cell
 status: todo
 assignee: null
 created: 2026-09-05
-updated: 2026-09-05
-tags: [sync, vcs, workspace, post-v1]
+updated: 2026-09-06
+tags: [sync, vcs, workspace]
 ---
 
 ## Goal
@@ -43,7 +43,8 @@ lives here rather than in a story so it survives the stories closing.
 ## Shape
 
 A bare repo per project, host-side, outside the cell rootfs, reached from
-inside the cell over the existing UDS bridge. Asymmetric naming is the point:
+inside the cell over a UDS bridge — a *new* socket of its own, not the
+firewall's (see Transport below). Asymmetric naming is the point:
 
 ```
 in-cell working tree ──"origin"──▶ ┌────────────┐ ◀──"shadow"── host working tree
@@ -70,7 +71,8 @@ authoritative; it is two peers sharing a repo.
 - **One socket, not one per repo**, with the repo name carried in the
   protocol. Keeps the socket path fixed and known-good (see
   [[guard-uds-socket-path-length]]), and gives one place for the
-  allow/deny/scan decision with the repo as an audit field.
+  allow/deny/scan decision with the repo as an audit field. One *git* socket,
+  distinct from the firewall's — see Transport below.
 - **Prefer `ext::` or a `git-remote-hotcell` helper over a `git://` loopback
   hop** — removes port allocation, discovery and collision. Implementation
   shape is proven: bind the hotcell binary read-only under a second name and
@@ -120,6 +122,32 @@ layout is not, and baking it in would break `ProvisionedEnvironment`'s
 Cellfile repo's contents into the cell; it is also how a cell improves its own
 environment, behind a review gate, so it is worth having — just not by
 default.
+
+### Transport
+
+Sync needs **its own socket**, and cannot assume the firewall has set anything
+up. Verified against the code:
+
+- The existing socket is `proxy.sock` (`src/cli.rs:271`) and carries HTTP
+  CONNECT. Git's pack protocol cannot share it; nothing multiplexes. Sync adds
+  a second socket in the same directory.
+- The bridge directory, its read-only bind, and the in-namespace forwarder are
+  all created only when `plan.bridge` is `Some` (`src/cli.rs:259-278`), which
+  happens only for a non-empty network policy — "Empty policy (offline): no
+  firewall, no bridge" (`src/cli.rs:240-242`), and `src/isolation.rs:309-312`
+  keeps `--unshare-net` with nothing mounted. **An offline cell that wants sync
+  currently gets no bridge at all.**
+
+So `plan.bridge` stops being a firewall concept and becomes a general
+cell-bridge that either or both features can populate. Sync must be able to
+stand up the directory, the bind, and its socket with no network policy
+present, and the airtight offline path (`--unshare-net`, no egress) must
+survive unchanged — a synced cell with an empty allowlist still reaches
+nothing but its shadow.
+
+Reused from the firewall: the directory siting, the read-only-bind property
+that stops the agent replacing the socket, and the `argv[0]` re-invocation
+pattern for the in-namespace helper. Not reused: the socket itself.
 
 ### Shadow lifecycle
 

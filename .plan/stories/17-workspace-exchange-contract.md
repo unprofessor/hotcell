@@ -1,7 +1,7 @@
 ---
 id: workspace-exchange-contract
 kind: story
-parent: post-v1-workspace-sync
+parent: workspace-sync
 title: Workspace exchange contract in Allium
 status: todo
 assignee: null
@@ -54,4 +54,4 @@ implement against, and it gates all of them.
 
 ## Notes
 
-- 2026-09-06 filed from the settled design in [[post-v1-workspace-sync]].
+- 2026-09-06 filed from the settled design in [[workspace-sync]].

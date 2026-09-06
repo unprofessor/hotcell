@@ -1,7 +1,7 @@
 ---
 id: shadow-repo-lifecycle
 kind: story
-parent: post-v1-workspace-sync
+parent: workspace-sync
 title: Shadow repo Birth and Death
 status: todo
 assignee: null
@@ -68,4 +68,4 @@ overrides the refusal, refusal is checked *before* prompting. This is where
 
 ## Notes
 
-- 2026-09-06 filed from the settled design in [[post-v1-workspace-sync]].
+- 2026-09-06 filed from the settled design in [[workspace-sync]].

@@ -1,7 +1,7 @@
 ---
 id: shadow-ref-protection
 kind: story
-parent: post-v1-workspace-sync
+parent: workspace-sync
 title: Opt-in per-ref push protection on the shadow
 status: todo
 assignee: null
@@ -58,4 +58,4 @@ tool.
 
 ## Notes
 
-- 2026-09-06 filed from the settled design in [[post-v1-workspace-sync]].
+- 2026-09-06 filed from the settled design in [[workspace-sync]].

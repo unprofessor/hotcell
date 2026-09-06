@@ -1,7 +1,7 @@
 ---
 id: workspace-repo-model
 kind: story
-parent: post-v1-workspace-sync
+parent: workspace-sync
 title: Cellfile repo slots and machine-local bindings
 status: todo
 assignee: null
@@ -53,6 +53,6 @@ later.
 
 ## Notes
 
-- 2026-09-06 filed from the settled design in [[post-v1-workspace-sync]].
+- 2026-09-06 filed from the settled design in [[workspace-sync]].
 - `.cell/` is gitignored and untracked (verified), so binding the Cellfile's
   own repo does not recursively carry cell state into the shadow.
