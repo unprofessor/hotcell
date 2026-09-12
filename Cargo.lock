@@ -332,6 +332,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "kdl",
+ "semvertag-shell",
  "serde",
  "serde_json",
  "sha2",
@@ -678,6 +679,31 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[package]]
+name = "semvertag-core"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9efcff50f80fd5553219b42581ab6a34f95101cda924127c1157631e03f8dcf8"
+dependencies = [
+ "semver",
+]
+
+[[package]]
+name = "semvertag-shell"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6c122a20a1350c011e6d5b9c72df25b72c2736fb0e279becafc12e81f860b46"
+dependencies = [
+ "semver",
+ "semvertag-core",
+]
 
 [[package]]
 name = "serde"

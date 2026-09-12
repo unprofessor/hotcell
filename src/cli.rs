@@ -24,7 +24,11 @@ use crate::provisioning::{provision, provision_digest, ProvisionOutcome};
 use crate::state;
 
 #[derive(Parser)]
-#[command(name = "hotcell", version, about = "An AI coding agent sandbox")]
+#[command(
+    name = "hotcell",
+    version = env!("SEMVERTAG_VERSION"),
+    about = "An AI coding agent sandbox"
+)]
 struct Cli {
     /// Path to the Cellfile, overriding the conventional `$PWD/Cellfile`.
     /// Applies to every subcommand. The cell's state directory lives

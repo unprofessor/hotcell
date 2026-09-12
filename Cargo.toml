@@ -33,3 +33,6 @@ tempfile = "3"
 [profile.release]
 strip = true
 lto = true
+
+[build-dependencies]
+semvertag-shell = "0.2.3"
