@@ -504,4 +504,338 @@ mod tests {
             "missing port on port-scoped endpoint"
         );
     }
+
+    // ── Behavior tests (added 2026-08-06, TDD session) ─────────────────────
+
+    /// CONNECT with no explicit port defaults to 443 (authority-form without
+    /// a port), matching the documented default in `handle_connect`.
+    ///
+    /// Requires CAP_NET_BIND_SERVICE to observe end-to-end (binds a real
+    /// 127.0.0.1:443 listener); skips gracefully where the sandbox denies
+    /// privileged-port binds (rootless containers).
+    #[test]
+    fn connect_without_port_defaults_to_443() {
+        let listener = match TcpListener::bind("127.0.0.1:443") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping: cannot bind 127.0.0.1:443 in this environment ({e})");
+                return;
+            }
+            Err(e) => panic!("bind 127.0.0.1:443 failed unexpectedly: {e}"),
+        };
+        thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                conn.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let mut buf = [0u8; 128];
+                loop {
+                    match conn.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if conn.write_all(&buf[..n]).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        // Policy allows the host with NO port restriction.
+        let handle = start(&policy(&[("127.0.0.1", None)])).unwrap();
+        // CONNECT without a port: authority-form "127.0.0.1" only.
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        client
+            .write_all(b"CONNECT 127.0.0.1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        let head = read_response_head(&mut client);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "default-port CONNECT should tunnel to 443, got: {head}"
+        );
+        // The tunnel must reach the 443 listener: echo a payload through it.
+        client.set_write_timeout(Some(Duration::from_secs(2))).ok();
+        client.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let payload = b"default-port-check";
+        client.write_all(payload).unwrap();
+        let mut got = [0u8; 128];
+        let n = client.read(&mut got).unwrap();
+        assert_eq!(
+            &got[..n],
+            payload,
+            "tunnel must forward bytes to 127.0.0.1:443"
+        );
+    }
+
+    /// Every non-CONNECT method is refused with 405, not just GET.
+    #[test]
+    fn all_non_connect_methods_refused() {
+        let handle = start(&policy(&[("api.openai.com", None)])).unwrap();
+        for method in ["POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"] {
+            let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+            let req =
+                format!("{method} http://api.openai.com/ HTTP/1.1\r\nHost: api.openai.com\r\n\r\n");
+            client.write_all(req.as_bytes()).unwrap();
+            let head = read_response_head(&mut client);
+            assert!(
+                head.starts_with("HTTP/1.1 405"),
+                "{method} should be refused with 405, got: {head}"
+            );
+        }
+    }
+
+    /// CONNECT with no authority at all is refused (malformed), never tunneled.
+    #[test]
+    fn connect_without_authority_refused() {
+        let handle = start(&policy(&[("api.openai.com", None)])).unwrap();
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        client
+            .write_all(b"CONNECT  HTTP/1.1\r\nHost: \r\n\r\n")
+            .unwrap();
+        let head = read_response_head(&mut client);
+        assert!(
+            head.starts_with("HTTP/1.1 4"),
+            "authority-less CONNECT must be refused with 4xx, got: {head}"
+        );
+    }
+
+    /// A denied CONNECT returns 403 with an empty body (no frames).
+    #[test]
+    fn denied_connect_has_empty_body() {
+        let handle = start(&policy(&[("allowed.example.com", Some(443))])).unwrap();
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        client
+            .write_all(
+                b"CONNECT denied.example.com:443 HTTP/1.1\r\nHost: denied.example.com:443\r\n\r\n",
+            )
+            .unwrap();
+        let head = read_response_head(&mut client);
+        assert!(head.starts_with("HTTP/1.1 403"), "got: {head}");
+        // Nothing may follow the response head: empty body.
+        client
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .ok();
+        let mut buf = [0u8; 16];
+        let n = client.read(&mut buf).unwrap_or(0);
+        assert_eq!(
+            n, 0,
+            "denied CONNECT must carry an empty body, read {n} bytes"
+        );
+    }
+
+    /// The tunnel carries data in BOTH directions: the upstream may push
+    /// bytes without waiting for the client to send anything first.
+    #[test]
+    fn tunnel_is_bidirectional_streaming() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                // Push a greeting immediately, without reading first.
+                let _ = conn.write_all(b"greeting-from-server");
+                conn.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                let _ = conn.read(&mut [0u8; 128]);
+            }
+        });
+        let (th, tp) = addr.rsplit_once(':').unwrap();
+        let port: u16 = tp.parse().unwrap();
+        let handle = start(&policy(&[(th, Some(port))])).unwrap();
+
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        let req = format!("CONNECT {addr} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+        client.write_all(req.as_bytes()).unwrap();
+        let head = read_response_head(&mut client);
+        assert!(head.starts_with("HTTP/1.1 200"), "got: {head}");
+
+        // Server pushes first: read its greeting before sending anything.
+        client.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let mut got = [0u8; 64];
+        let n = client.read(&mut got).unwrap();
+        assert_eq!(&got[..n], b"greeting-from-server");
+    }
+
+    /// Client half-close (EOF on write) is forwarded to the upstream, and
+    /// the upstream's post-EOF response still flows back to the client.
+    #[test]
+    fn client_half_close_forwards_eof_and_response_flows() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                conn.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                // Read until EOF (client half-closed its write side).
+                let mut buf = [0u8; 128];
+                loop {
+                    match conn.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+                // Send a final response only after seeing EOF.
+                let _ = conn.write_all(b"after-eof-response");
+            }
+        });
+        let (th, tp) = addr.rsplit_once(':').unwrap();
+        let port: u16 = tp.parse().unwrap();
+        let handle = start(&policy(&[(th, Some(port))])).unwrap();
+
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        let req = format!("CONNECT {addr} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+        client.write_all(req.as_bytes()).unwrap();
+        let head = read_response_head(&mut client);
+        assert!(head.starts_with("HTTP/1.1 200"), "got: {head}");
+
+        // Send bytes, then half-close our write side.
+        client.write_all(b"request").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        // The server's post-EOF response must reach us through the tunnel.
+        client.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let mut got = [0u8; 64];
+        let mut read = Vec::new();
+        loop {
+            match client.read(&mut got) {
+                Ok(0) => break,
+                Ok(n) => read.extend_from_slice(&got[..n]),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            read.windows(b"after-eof-response".len())
+                .any(|w| w == b"after-eof-response"),
+            "post-EOF server response must flow through the tunnel, got: {read:?}"
+        );
+    }
+
+    /// Documents CURRENT behavior: the 200 for CONNECT is sent before the
+    /// upstream dial completes, so a refused upstream yields 200-then-EOF.
+    /// (Plan Phase 6 wants a deterministic error response instead.)
+    #[test]
+    fn refused_upstream_yields_200_then_eof() {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap().to_string();
+        drop(probe); // nothing is listening anymore
+        let (th, tp) = addr.rsplit_once(':').unwrap();
+        let port: u16 = tp.parse().unwrap();
+        let handle = start(&policy(&[(th, Some(port))])).unwrap();
+
+        let head = send_connect(handle.listen_addr(), &addr);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "dial is async, so the client sees 200 first, got: {head}"
+        );
+    }
+
+    // ── RED: planned Phase 1/2 behavior (fails today; TDD targets) ────────
+
+    /// Phase 1 (globs): `*.example.com` must match the apex and any
+    /// subdomain. Fails today: no glob support → 403.
+    #[test]
+    fn glob_host_matches_subdomain_and_apex() {
+        let handle = start(&policy(&[("*.example.com", None)])).unwrap();
+        for host in ["api.example.com", "example.com", "a.b.example.com"] {
+            let head = send_connect(handle.listen_addr(), &format!("{host}:443"));
+            assert!(
+                head.starts_with("HTTP/1.1 200"),
+                "glob *.example.com should allow {host}, got: {head}"
+            );
+        }
+    }
+
+    /// Phase 1 (globs): globs must not cross domain boundaries.
+    /// Passes today trivially; guards the future glob matcher.
+    #[test]
+    fn glob_host_does_not_cross_domains() {
+        let handle = start(&policy(&[("*.example.com", None)])).unwrap();
+        for host in ["evil-example.com", "notexample.com", "example.com.evil.net"] {
+            let head = send_connect(handle.listen_addr(), &format!("{host}:443"));
+            assert!(
+                head.starts_with("HTTP/1.1 403"),
+                "glob *.example.com must NOT allow {host}, got: {head}"
+            );
+        }
+    }
+
+    /// Phase 2 (upstream IP deny / SSRF): an allowlisted hostname that
+    /// resolves to loopback must be refused. `localhost` → 127.0.0.1 is the
+    /// canonical DNS-rebinding stand-in. Fails today: the proxy tunnels
+    /// straight to the resolved address (200).
+    #[test]
+    fn allowlisted_host_resolving_to_loopback_is_denied() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        // Keep a live listener so any pass is a real tunnel, not a refused
+        // connection — the denial must come from the deny list.
+        thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                let _ = conn.write_all(b"should-never-arrive");
+                let _ = conn.read(&mut [0u8; 16]);
+            }
+        });
+        let handle = start(&policy(&[("localhost", None)])).unwrap();
+
+        let target = addr.replace("127.0.0.1", "localhost");
+        let head = send_connect(handle.listen_addr(), &target);
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "localhost (loopback) must be denied by the upstream IP deny list, got: {head}"
+        );
+    }
+
+    /// Phase 2: the cloud metadata service (IMDS 169.254.169.254) is denied
+    /// even when explicitly allowlisted.
+    #[test]
+    fn imds_denied_even_when_allowlisted() {
+        let handle = start(&policy(&[("169.254.169.254", Some(80))])).unwrap();
+        let head = send_connect(handle.listen_addr(), "169.254.169.254:80");
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "IMDS must be denied by the upstream IP deny list, got: {head}"
+        );
+    }
+
+    /// Phase 6 (host normalization): a trailing dot is DNS-equivalent and
+    /// must match the same policy entry. Fails today: exact match on the
+    /// dotted host → 403.
+    #[test]
+    fn trailing_dot_host_matches_policy() {
+        let handle = start(&policy(&[("example.com", Some(443))])).unwrap();
+        let head = send_connect(handle.listen_addr(), "example.com.:443");
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "trailing-dot host should normalize to example.com, got: {head}"
+        );
+    }
+
+    /// IPv6-literal CONNECT targets surface as the BRACKETED form (`[::1]`),
+    /// so bracketed policy hosts match. RED as of 2026-08-06: the tunnel
+    /// then fails because `TcpStream::connect(("[::1]", port))` cannot
+    /// resolve the bracketed host (getaddrinfo rejects it) — the client
+    /// sees 200 followed by EOF. Fix (Phase 2/6): strip brackets before
+    /// dialing, or normalize the policy host to the unbracketed form.
+    #[test]
+    fn bracketed_ipv6_connect_matches_bracketed_policy() {
+        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string(); // "[::1]:PORT"
+        thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                let _ = conn.write_all(b"v6-ok");
+                let _ = conn.read(&mut [0u8; 16]);
+            }
+        });
+        // Policy host must be the bracketed form to match CONNECT targets.
+        let handle = start(&policy(&[("[::1]", None)])).unwrap();
+        let mut client = TcpStream::connect(handle.listen_addr()).unwrap();
+        let req = format!("CONNECT {addr} HTTP/1.1\r\nHost: {addr}\r\n\r\n");
+        client.write_all(req.as_bytes()).unwrap();
+        let head = read_response_head(&mut client);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "bracketed IPv6 policy should match bracketed CONNECT target, got: {head}"
+        );
+        // And the tunnel must reach the ::1 listener.
+        client.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        let mut got = [0u8; 16];
+        let n = client.read(&mut got).unwrap();
+        assert_eq!(&got[..n], b"v6-ok", "tunnel must reach the ::1 listener");
+    }
 }
